@@ -6,7 +6,7 @@ from pathlib import Path
 from pydantic import BaseModel
 import os
 
-from .logic import run_pipeline, compute_overlay_from_event
+from logic import run_pipeline, compute_overlay_from_event
 
 app = FastAPI(title="Quake PGA Web", version="1.0.0")
 
@@ -75,3 +75,4 @@ if __name__ == "__main__":
         port=int(os.environ.get("PORT", 8000)),
         reload=True
     )
+
