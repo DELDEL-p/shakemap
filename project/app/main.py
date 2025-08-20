@@ -4,15 +4,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 from pydantic import BaseModel
+import os
 
 from .logic import run_pipeline, compute_overlay_from_event
 
 app = FastAPI(title="Quake PGA Web", version="1.0.0")
 
-# ถ้าต้องการเปิดใช้จากโดเมนอื่น ๆ
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ปรับให้เหมาะสมในโปรดักชัน
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -47,7 +47,6 @@ def api_run():
 @app.post("/api/run_custom")
 def api_run_custom(ev: CustomEvent):
     try:
-        # basic validation
         if not (-90.0 <= ev.lat <= 90.0):
             return JSONResponse({"error": "lat ต้องอยู่ในช่วง -90 ถึง 90"}, status_code=400)
         if not (-180.0 <= ev.lon <= 180.0):
@@ -66,3 +65,13 @@ def api_run_custom(ev: CustomEvent):
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 8000)),
+        reload=True
+    )
