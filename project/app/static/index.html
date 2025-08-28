@@ -14,6 +14,12 @@
   <link rel="stylesheet" href="/static/style.css?v=2">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
 
+  <!-- ซ่อน/แสดงปุ่ม ops-only ด้วยคลาสที่ body -->
+  <style>
+    .ops-only { display: none !important; }
+    .ops-mode .ops-only { display: inline-flex !important; } /* หรือ block ตาม layout */
+  </style>
+
   <!-- Firebase (Compat v9) -->
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
@@ -53,6 +59,11 @@
         <button id="simulateBtn" class="icon-btn" title="จำลองเหตุการณ์" aria-label="จำลองเหตุการณ์">
           <i class="fa-solid fa-wave-square"></i>
         </button>
+
+        <!-- ปุ่มล้าง Pins (ops-only) -->
+        <button id="clearPinsBtn" class="icon-btn ops-only" title="ล้าง Pins" aria-label="ล้าง Pins">
+          <i class="fa-solid fa-trash-can"></i>
+        </button>
       </div>
     </div>
   </div>
@@ -62,7 +73,7 @@
 
   <!-- PGA Legend -->
   <div id="legend" class="legend" style="display:none">
-    <div class="legend-title">PGA (%g)</div>
+    <div class="legend-title"><strong>PGA (%g)</strong></div>
     <div class="legend-bar"></div>
     <div class="legend-labels"></div>
   </div>
@@ -96,6 +107,24 @@
         <div class="modal-actions">
           <button type="button" id="simCancel" class="btn-secondary">ยกเลิก</button>
           <button type="submit" id="simSubmit" class="btn-primary">คำนวณ</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: ยืนยันรหัสล้าง Pins -->
+  <div id="clearPinsModal" class="modal-backdrop" style="display:none">
+    <div class="modal">
+      <h3 class="modal-title">ล้าง Pins ทั้งหมด</h3>
+      <form id="clearPinsForm" class="modal-body">
+        <div class="row">
+          <label>กรอกรหัสยืนยัน
+            <input id="clearCodeInput" type="password" autocomplete="off" placeholder="ใส่รหัส">
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="clearCancel" class="btn-secondary">ยกเลิก</button>
+          <button type="submit" id="clearConfirm" class="btn-primary">ลบเลย</button>
         </div>
       </form>
     </div>
@@ -187,25 +216,19 @@
       if (map.hasLayer(legendLayer)) map.removeLayer(legendLayer);
     }
 
-    let _btnTmr = null, _btnStart = 0;
+    /* ---- ปิดนับเวลาบนปุ่ม RUN ---- */
+    let _btnTmr = null;
     function setRunBtnTimer(running){
       const btn = document.getElementById('runBtn');
-      if(running){
-        _btnStart = Date.now();
-        btn.disabled = true;
-        _btnTmr = setInterval(()=>{
-          const s = Math.floor((Date.now() - _btnStart) / 1000);
-          btn.textContent = `${s}s`;
-        }, 200);
-      }else{
-        if(_btnTmr){ clearInterval(_btnTmr); _btnTmr = null; }
-        btn.disabled = false;
-        btn.innerHTML = `<i class="fa-solid fa-house-crack" aria-hidden="true"></i>`;
-      }
+      if (!btn) return;
+      if (_btnTmr) { clearInterval(_btnTmr); _btnTmr = null; }
+      btn.disabled = !!running;
+      btn.innerHTML = `<i class="fa-solid fa-house-crack" aria-hidden="true"></i>`;
     }
 
-    async function runCompute(){
-      setRunBtnTimer(true);
+    async function runCompute(opts = {}){
+      const useTimer = opts.timer !== false;
+      if (useTimer) setRunBtnTimer(true);
       toast('กำลังดึงข้อมูลล่าสุดจาก TMD และคำนวณ PGA ...');
       try{
         resetLatest();
@@ -231,15 +254,22 @@
         if (popup_html) epicenterMarker.openPopup();
 
         map.fitBounds(bounds, { padding:[20,20] });
+        const MIN_ZOOM_ON_EVENT = 12;
+        const fitZ    = map.getBoundsZoom(L.latLngBounds(bounds), true);
+        const targetZ = Math.max(fitZ + 1, MIN_ZOOM_ON_EVENT);
+        map.flyTo(epicenter, targetZ, { duration: 0.6 });
+
         lastEpicenter = epicenter;
         lastPGAData  = { bounds, epicenter, image_data_url, popup_html, meta };
         toast(`สำเร็จ: เวลา ${meta?.time_th || '-'}, ${meta?.changwat || '-'}`);
         updateUserMarkerPopup(); drawUserDistanceLine();
-      }catch(err){
+      }
+      catch(err){
         console.error(err);
         toast('เกิดข้อผิดพลาด: '+(err.message||err), true);
-      }finally{
-        setRunBtnTimer(false);
+      }
+      finally{
+        if (useTimer) setRunBtnTimer(false);
       }
     }
 
@@ -528,6 +558,55 @@
       if (currentUser) subscribePins();
     });
 
+    // ===== OPS MODE (ไม่มี admin account) =====
+    (() => {
+      const OPS_CODE   = '123456';          // ตั้งรหัสที่ต้องการ
+      const OPS_TTL_MS = 1 * 60 * 1000;    // อยู่ได้ 1 นาที
+      const LS_KEY     = 'opsModeUntil';
+      const q = new URLSearchParams(location.search);
+
+      function setOpsMode(on){
+        if (on) localStorage.setItem(LS_KEY, String(Date.now() + OPS_TTL_MS));
+        else    localStorage.removeItem(LS_KEY);
+        document.body.classList.toggle('ops-mode', on);
+      }
+      function isOpsMode(){
+        const exp = +localStorage.getItem(LS_KEY) || 0;
+        if (exp && Date.now() < exp) return true;
+        localStorage.removeItem(LS_KEY);
+        return false;
+      }
+      function askCode(){
+        const code = prompt('รหัสสำหรับโหมดลับ:');
+        if (!code) return false;
+        if (code === OPS_CODE){ setOpsMode(true); toast('เปิดโหมดลับแล้ว'); return true; }
+        toast('รหัสไม่ถูกต้อง', true); return false;
+      }
+
+      if (q.get('ops') === '1') {
+        setOpsMode(true);
+        history.replaceState({}, '', location.pathname + location.hash);
+      } else {
+        setOpsMode(isOpsMode());
+      }
+
+      document.addEventListener('keydown', (e) => {
+        if (e.altKey && e.shiftKey && e.code === 'KeyO') { e.preventDefault(); askCode(); }
+      });
+
+      let taps=0, last=0;
+      document.addEventListener('click', (e) => {
+        const inTopRight = e.clientX > (innerWidth - 120) && e.clientY < 120;
+        if (!inTopRight) return;
+        const now = Date.now();
+        taps = (now - last < 600) ? taps + 1 : 1;
+        last = now;
+        if (taps >= 5) { taps = 0; askCode(); }
+      });
+
+      window.exitOpsMode = () => setOpsMode(false);
+    })();
+
     // ===== Nickname state =====
     let currentNickname = '';
     function loadNickname(){
@@ -626,7 +705,6 @@
     }
 
     /* ====== Simulate dialog ====== */
-    // ทำให้ผูก event หลัง DOM พร้อมแน่นอน
     window.addEventListener('DOMContentLoaded', () => {
       const modalEl  = document.getElementById('simulateModal');
       const simBtn   = document.getElementById('simulateBtn');
@@ -645,20 +723,14 @@
       simCancel?.addEventListener('click', ()=> showSimModal(false));
       modalEl?.addEventListener('click', (e)=>{ if (e.target === modalEl) showSimModal(false); });
 
-      let _simTmr=null, _simStart=0;
+      /* ---- ปิดนับเวลาบนปุ่ม SIMULATE ---- */
+      let _simTmr = null;
       function setSimBtnTimer(running){
-        if(!simBtn) return;
-        if(running){
-          _simStart = Date.now(); simBtn.disabled = true;
-          _simTmr = setInterval(()=>{
-            const s = Math.floor((Date.now()-_simStart)/1000);
-            simBtn.textContent = `${s}s`;
-          }, 200);
-        }else{
-          if(_simTmr){ clearInterval(_simTmr); _simTmr=null; }
-          simBtn.disabled = false;
-          simBtn.innerHTML = `<i class="fa-solid fa-wave-square"></i>`;
-        }
+        const simBtn = document.getElementById('simulateBtn');
+        if (!simBtn) return;
+        if (_simTmr) { clearInterval(_simTmr); _simTmr = null; }
+        simBtn.disabled = !!running;
+        simBtn.innerHTML = `<i class="fa-solid fa-wave-square"></i>`;
       }
 
       async function simulateCompute(lat, lon, depth, mag){
@@ -666,7 +738,7 @@
         toast('กำลังคำนวณเหตุการณ์จำลอง…');
         try{
           resetLatest();
-          const res = await fetch('/api/simulate', {   // <-- เรียก endpoint จำลอง
+          const res = await fetch('/api/simulate', {
             method:'POST',
             headers:{ 'Content-Type':'application/json' },
             body: JSON.stringify({ lat, lon, depth, mag })
@@ -692,6 +764,11 @@
           if (popup_html) epicenterMarker.openPopup();
 
           map.fitBounds(bounds, { padding:[20,20] });
+          const MIN_ZOOM_ON_EVENT = 12;
+          const fitZ    = map.getBoundsZoom(L.latLngBounds(bounds), true);
+          const targetZ = Math.max(fitZ + 1, MIN_ZOOM_ON_EVENT);
+          map.flyTo(epicenter, targetZ, { duration: 0.6 });
+
           lastEpicenter = epicenter;
           lastPGAData  = { bounds, epicenter, image_data_url, popup_html, meta };
           toast(`สำเร็จ: จำลอง Mw ${meta?.mag ?? meta?.mag_api ?? mag}, depth ${meta?.depth_km ?? depth} km`);
@@ -721,10 +798,74 @@
       });
     });
 
+    /* ====== Clear Pins ====== */
+    (function(){
+      const CLEAR_CODE = "123456"; // แก้รหัสที่นี่
+      const modal = document.getElementById('clearPinsModal');
+      const form  = document.getElementById('clearPinsForm');
+      const input = document.getElementById('clearCodeInput');
+      const btn   = document.getElementById('clearPinsBtn');
+      const btnCancel = document.getElementById('clearCancel');
+
+      function showClearModal(show=true){
+        if (!modal) return;
+        modal.style.display = show ? 'flex' : 'none';
+        if (show) { input.value = ""; setTimeout(()=>input?.focus(), 50); }
+      }
+
+      async function deletePinsBatch(limit=300){
+        const FieldPath = firebase.firestore.FieldPath;
+        const snap = await db.collection('pins')
+          .orderBy(FieldPath.documentId())
+          .limit(limit)
+          .get();
+        if (snap.empty) return 0;
+        const batch = db.batch();
+        snap.forEach(doc => batch.delete(doc.ref));
+        await batch.commit();
+        return snap.size;
+      }
+
+      async function clearAllPins(){
+        btn.disabled = true;
+        toast('กำลังลบ Pins ทั้งหมด…');
+        let total = 0, removed;
+        try{
+          do{
+            removed = await deletePinsBatch(300);
+            total += removed;
+          }while(removed > 0);
+          toast(`ลบ Pins ทั้งหมดสำเร็จ (${total} รายการ)`);
+        }catch(e){
+          console.error(e);
+          toast('ลบ Pins ไม่สำเร็จ: ' + (e.message || e), true);
+        }finally{
+          btn.disabled = false;
+        }
+      }
+
+      btn?.addEventListener('click', ()=> showClearModal(true));
+      btnCancel?.addEventListener('click', ()=> showClearModal(false));
+      modal?.addEventListener('click', (e)=>{ if (e.target === modal) showClearModal(false); });
+
+      form?.addEventListener('submit', async (e)=>{
+        e.preventDefault();
+        const code = (input.value || "").trim();
+        if (!code) return toast('กรุณากรอกรหัส', true);
+        if (code !== CLEAR_CODE) return toast('รหัสไม่ถูกต้อง', true);
+        showClearModal(false);
+        await clearAllPins();
+      });
+    })();
+
     function setLegendVisible(show){
       const box = document.getElementById('legend');
       box.style.display = show ? 'block' : 'none';
     }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      setTimeout(() => runCompute({ timer: false }), 300);
+    });
   </script>
 </body>
 </html>
