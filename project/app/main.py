@@ -1,4 +1,3 @@
-# app/main.py
 from typing import Annotated, Optional
 from pathlib import Path
 
@@ -67,12 +66,4 @@ def api_simulate(req: SimRequest):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
-
-
-if __name__ == "__main__":
-    import uvicorn, os
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
-
-
-
+    return {"status": "ok"} 
