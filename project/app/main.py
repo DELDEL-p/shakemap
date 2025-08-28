@@ -1,12 +1,14 @@
-from fastapi import FastAPI, Response
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+# app/main.py
+from typing import Annotated, Optional
 from pathlib import Path
-from pydantic import BaseModel
-import os
 
-from logic import run_pipeline, compute_overlay_from_event
+from fastapi import FastAPI, Body
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from .logic import run_pipeline, simulate_event
 
 app = FastAPI(title="Quake PGA Web", version="1.0.0")
 
@@ -22,45 +24,46 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-
-class CustomEvent(BaseModel):
-    lat: float
-    lon: float
-    mag: float
-    depth: float
-
-
 @app.get("/")
 def index():
     return FileResponse(str(STATIC_DIR / "index.html"))
 
-
+# --- แก้ตรงนี้: /api/run รองรับ simulate ด้วย ---
 @app.post("/api/run")
-def api_run():
+def api_run(body: Optional[dict] = Body(default=None)):
     try:
+        if body and body.get("mode") == "simulate":
+            lat   = float(body["lat"])
+            lon   = float(body["lon"])
+            depth = float(body["depth"])
+            mag   = float(body["mag"])
+            data = simulate_event(lat=lat, lon=lon, depth_km=depth, mag=mag)
+            return JSONResponse(data)
+        # ปกติ: ดึงเหตุการณ์ล่าสุดจาก TMD
         data = run_pipeline()
         return JSONResponse(data)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+# --- มี /api/simulate ไว้ด้วย เผื่อ frontend เรียกเส้นนี้ ---
+class SimRequest(BaseModel):
+    lat:   Annotated[float, Field(ge=-90,  le=90)]
+    lon:   Annotated[float, Field(ge=-180, le=180)]
+    depth: Annotated[float, Field(ge=0,    le=700)]
+    mag:   Annotated[float, Field(ge=1,    le=10)]
 
-@app.post("/api/run_custom")
-def api_run_custom(ev: CustomEvent):
+@app.post("/api/simulate")
+def api_simulate(req: SimRequest):
     try:
-        if not (-90.0 <= ev.lat <= 90.0):
-            return JSONResponse({"error": "lat ต้องอยู่ในช่วง -90 ถึง 90"}, status_code=400)
-        if not (-180.0 <= ev.lon <= 180.0):
-            return JSONResponse({"error": "lon ต้องอยู่ในช่วง -180 ถึง 180"}, status_code=400)
-        if not (0.0 <= ev.mag <= 10.0):
-            return JSONResponse({"error": "mag ต้องอยู่ในช่วง 0 ถึง 10"}, status_code=400)
-        if not (0.0 <= ev.depth <= 700.0):
-            return JSONResponse({"error": "depth ต้องอยู่ในช่วง 0 ถึง 700 กม."}, status_code=400)
-
-        data = compute_overlay_from_event(ev.dict())
+        data = simulate_event(
+            lat=float(req.lat),
+            lon=float(req.lon),
+            depth_km=float(req.depth),
+            mag=float(req.mag),
+        )
         return JSONResponse(data)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
-
 
 @app.get("/api/health")
 def health():
@@ -70,5 +73,6 @@ def health():
 if __name__ == "__main__":
     import uvicorn, os
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
 
 
