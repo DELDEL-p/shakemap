@@ -5,27 +5,26 @@ import base64
 import numpy as np
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
+from scipy.interpolate import griddata   # ใช้เท่านี้พอ
 
-# ====== Kriging / Interp switches ======
-try:
-    from pykrige.ok import OrdinaryKriging
-    _HAS_KRIGE = True
-except Exception:
-    from scipy.interpolate import griddata
-    _HAS_KRIGE = False
-
-USE_KRIGING        = False     # เปิด/ปิดการใช้ Kriging
-VARIOGRAM_MODEL    = "spherical"  # 'linear'|'power'|'gaussian'|'spherical'|'exponential'
-KRIGE_SAMPLE_STEP  = 2            # เลือกจุดตัวอย่างห่าง ๆ (2=ทุกๆ 2 จุด จากกริดหนาแน่น)
-TARGET_SPACING_DEG = 0.025        # ความละเอียดกริด “ปลายทาง” หลัง interpolate
-SOFTMASK_SIGMA_KM  = 50.0         # sigma ของ Gaussian soft mask
-
+# ====== Interpolation switches ======
+USE_INTERPOLATION  = True          # บังคับใช้ interpolation
+TARGET_SPACING_DEG = 0.025         # ความละเอียดกริด “ปลายทาง” หลัง interpolate
+SAMPLE_STEP        = 2             # เลือกจุดตัวอย่างห่าง ๆ
+SOFTMASK_SIGMA_KM  = 50.0          # sigma ของ Gaussian soft mask
 TMD_URL = "https://earthquake.tmd.go.th/inside.html"
+
+# ====== HTTP headers (รวมที่เดียว) ======
+_HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (QuakePGA/1.0; +local)",
+    "Accept-Language": "th,th-TH;q=0.9,en;q=0.8",
+}
+
 
 # -------------------- Utilities --------------------
 def _clean_num(s: str) -> float:
@@ -72,7 +71,7 @@ def reverse_geocode_th(lat: float, lon: float, timeout=15):
         "zoom": 12,
         "addressdetails": 1,
     }
-    headers = {"User-Agent": "Mozilla/5.0 (Python requests for quake QA)"}
+    headers = {"User-Agent": _HTTP_HEADERS["User-Agent"]}
     try:
         r = requests.get(url, params=params, headers=headers, timeout=timeout)
         r.raise_for_status()
@@ -103,8 +102,7 @@ def _parse_tambon_from_text(s: str):
     return tambon, amphoe, changwat
 
 def fetch_latest_event_in_thailand():
-    headers = {"User-Agent": "Mozilla/5.0"}
-    html = requests.get(TMD_URL, timeout=20, headers=headers).text
+    html = requests.get(TMD_URL, timeout=20, headers=_HTTP_HEADERS).text
     soup = BeautifulSoup(html, "html.parser")
     lines = [ln.strip() for ln in soup.get_text("\n").splitlines() if ln.strip()]
 
@@ -171,7 +169,6 @@ def _fmt_num(x, digits=3):
 # ---------- คำนวณ GMPE (CY08) ที่ “จุดที่กำหนด” ----------
 def _pga_cy08_at_points(mag, depth, src_lat, src_lon, lat_arr, lon_arr):
     """คำนวณ PGA (หน่วย %g) ที่ชุดพิกัด lat_arr/lon_arr ตาม CY08"""
-    # กลไก (เหมือน VB)
     strike = 0.0
     dip    = 45.0
     rake   = 0.0
@@ -197,15 +194,15 @@ def _pga_cy08_at_points(mag, depth, src_lat, src_lon, lat_arr, lon_arr):
     coshxx = (np.exp(xx) + np.exp(-xx)) / 2.0
     ff2 = c2 * (mag - 6.0) + ((c2 - c3) / cn) * np.log1p(np.exp(cn * (cm - mag)))
 
-    # ระยะทาง
     DEG2RAD = math.pi / 180.0
     coslat = np.cos(lat_arr * DEG2RAD)
     dx_km = (src_lon - lon_arr) * coslat * 111.0
     dy_km = (src_lat - lat_arr) * 111.0
     dist_km = np.sqrt(dx_km**2 + dy_km**2)
 
-    ff33 = c4 * np.log(dist_km + c5 * coshxx)
-    ff43 = (c4a - c4) * np.log(np.sqrt(dist_km**2 + crb**2))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ff33 = c4 * np.log(dist_km + c5 * coshxx)
+        ff43 = (c4a - c4) * np.log(np.sqrt(dist_km**2 + crb**2))
 
     max2 = max(mag - cy3, 0.0)
     xxx = max2
@@ -219,7 +216,7 @@ def _pga_cy08_at_points(mag, depth, src_lat, src_lon, lat_arr, lon_arr):
 def compute_overlay_from_event(ev: dict):
     """
     รับ ev = {lat, lon, mag, depth, region, time_th, time_utc}
-    คืนผล JSON-ready (เหมือนเดิม) โดยเพิ่มขั้นตอน Interpolation (Kriging/griddata)
+    คืนผล JSON-ready โดยเพิ่มขั้นตอน Interpolation (griddata)
     """
     lat = float(ev["lat"]); lon = float(ev["lon"]); mag = float(ev["mag"]); depth = float(ev["depth"])
     region_text = ev.get("region", "")
@@ -235,15 +232,6 @@ def compute_overlay_from_event(ev: dict):
         amphoe = amphoe or a2
         changwat = changwat or c2
 
-    # สร้างชื่อสถานที่สำหรับจุดศูนย์กลาง (ใช้ reverse-geocode ก่อน, จากนั้น region, สุดท้ายพิกัด)
-    parts = []
-    if tambon: parts.append(f"ต.{tambon}")
-    if amphoe: parts.append(f"อ.{amphoe}")
-    if changwat: parts.append(f"จ.{changwat}")
-    center_name = " ".join(parts).strip() or (region_text.strip() if region_text else "")
-    if not center_name:
-        center_name = f"({lat:.3f}, {lon:.3f})"
-
     # -------------------- กริดปลายทาง & กริดตัวอย่าง --------------------
     half_box_deg = 2.0
     latmin = lat - half_box_deg
@@ -254,66 +242,64 @@ def compute_overlay_from_event(ev: dict):
     tgt_spacing = float(TARGET_SPACING_DEG)
     n_lat_t = int(round((latmax - latmin) / tgt_spacing))
     n_lon_t = int(round((lonmax - lonmin) / tgt_spacing))
-    # --- Force odd number of grid points so center is at epicenter ---
     if n_lat_t % 2 == 0: n_lat_t += 1
     if n_lon_t % 2 == 0: n_lon_t += 1
     lat_vals_t = latmin + tgt_spacing * np.arange(n_lat_t)
     lon_vals_t = lonmin + tgt_spacing * np.arange(n_lon_t)
-    LAT_T, LON_T = np.meshgrid(lat_vals_t, lon_vals_t, indexing="ij")  # target grid
+    LAT_T, LON_T = np.meshgrid(lat_vals_t, lon_vals_t, indexing="ij")  # (n_lat, n_lon)
 
-    # กริดตัวอย่าง (หยาบกว่า เอาไปเป็น sample ของการ interpolate)
-    base_spacing = tgt_spacing * max(1, int(KRIGE_SAMPLE_STEP))
+    base_spacing = tgt_spacing * max(1, int(SAMPLE_STEP))
     n_lat_s = int(round((latmax - latmin) / base_spacing))
     n_lon_s = int(round((lonmax - lonmin) / base_spacing))
     lat_vals_s = latmin + base_spacing * np.arange(n_lat_s)
     lon_vals_s = lonmin + base_spacing * np.arange(n_lon_s)
-    LAT_S, LON_S = np.meshgrid(lat_vals_s, lon_vals_s, indexing="ij")  # sample grid
+    LAT_S, LON_S = np.meshgrid(lat_vals_s, lon_vals_s, indexing="ij")
 
-    # คำนวณ PGA ที่ “จุดตัวอย่าง” ด้วย CY08
     PGA_S = _pga_cy08_at_points(mag, depth, lat, lon, LAT_S, LON_S)
 
-    # -------------------- Interpolation (Kriging / griddata / none) --------------------
-    if USE_KRIGING and _HAS_KRIGE:
-        # เตรียมข้อมูลจุดกระจาย (x=lon, y=lat)
-        x = LON_S.ravel()
-        y = LAT_S.ravel()
-        z = PGA_S.ravel()
-
-        # ป้องกันค่า non-positive (บาง variogram ไม่ชอบค่า 0)
-        z = np.where(np.isfinite(z), z, 0.0)
-
-        # Ordinary Kriging 2D
-        OK = OrdinaryKriging(
-            x, y, z,
-            variogram_model=VARIOGRAM_MODEL,
-            enable_plotting=False,
-            coordinates_type="geographic"  # lat/lon
-        )
-        PGA_T, _ = OK.execute("grid", lon_vals_t, lat_vals_t)  # คืนเป็น (n_lat, n_lon)
-        PGA_T = np.asarray(PGA_T, dtype=float)
-
-    elif USE_KRIGING and not _HAS_KRIGE:
-        # fallback → griddata (linear)
+    # -------------------- Interpolation (griddata) --------------------
+    if USE_INTERPOLATION:
         points = np.column_stack([LON_S.ravel(), LAT_S.ravel()])
         values = PGA_S.ravel().astype(float)
         PGA_T = griddata(points, values, (LON_T, LAT_T), method="linear")
-        # เติมช่องว่างด้วย nearest เพื่อให้เต็ม
         nanmask = ~np.isfinite(PGA_T)
         if np.any(nanmask):
             PGA_T2 = griddata(points, values, (LON_T, LAT_T), method="nearest")
             PGA_T[nanmask] = PGA_T2[nanmask]
     else:
-        # ไม่ใช้ interpolation → คำนวณ CY08 ตรง ๆ บนกริดปลายทาง
         PGA_T = _pga_cy08_at_points(mag, depth, lat, lon, LAT_T, LON_T)
 
-    # Soft mask ให้ขอบเนียน
+    # Soft mask
     dist_ep = _haversine(lat, lon, LAT_T, LON_T)
     soft_mask = np.exp(-0.5 * (dist_ep / float(SOFTMASK_SIGMA_KM))**2)
     masked_pga = PGA_T * soft_mask
     masked_pga = np.where(np.isnan(masked_pga), 0.0, masked_pga)
     masked_pga = np.where(masked_pga < 0, 0.0, masked_pga)
 
-    pga_max = float(np.max(masked_pga))
+    pga_max = float(np.nanmax(masked_pga))
+
+    # ----- Legend (0 → pga_max) ใช้ colormap/normalize เดียวกับภาพ -----
+    import matplotlib.cm as cm
+    cmap = cm.get_cmap("jet")
+    vmin_show = 0.0
+    vmax_show = float(pga_max)
+    if not np.isfinite(vmax_show) or vmax_show <= vmin_show:
+        vmax_show = vmin_show + 1e-6  # กัน division-by-zero/flat image
+    norm_show = Normalize(vmin=vmin_show, vmax=vmax_show)
+
+    tick_vals = np.linspace(vmin_show, vmax_show, 7)
+    def _to_hex(rgb):
+        r,g,b,a = rgb
+        return "#{:02x}{:02x}{:02x}".format(int(r*255), int(g*255), int(b*255))
+    legend = {
+        "units": "%g",
+        "min": float(vmin_show),
+        "max": float(vmax_show),
+        "stops": [
+            {"value": float(v), "color": _to_hex(cmap(norm_show(v)))}
+            for v in tick_vals
+        ],
+    }
 
     # --- PGA grid points for nearest lookup ---
     pga_points = []
@@ -327,7 +313,7 @@ def compute_overlay_from_event(ev: dict):
 
     # วาดภาพโปร่งใสเป็น PNG
     fig, ax = plt.subplots(figsize=(8, 8), dpi=150)
-    norm = Normalize(vmin=float(masked_pga.min()), vmax=float(masked_pga.max()))
+    norm = Normalize(vmin=vmin_show, vmax=vmax_show)
     ax.imshow(
         masked_pga,
         extent=[lonmin, lonmax, latmin, latmax],
@@ -354,8 +340,8 @@ def compute_overlay_from_event(ev: dict):
 <div style="line-height:1.2; font-size:1.05em">
   วันเวลา: <b>{time_th_fmt} น.</b><br>
   ขนาด: <b>{_fmt_num(mag, 2)}</b><br>
-  จุดศูนย์กลาง: <b>{center_name}</b><br>
-  ค่าระดับการสั่นสะเทือนสูงสุด: <b><span style="color:red;">{_fmt_num(pga_max, 3)}</span> %g</b><br>
+  จุดศูนย์กลาง: <b>{region_text}</b><br>
+  ค่าระดับการสั่นสะเทือนสูงสุด: <b><span style="color:red;">{_fmt_num(pga_max, 4)}</span> %g</b><br>
 </div>
 """.strip()
 
@@ -368,10 +354,10 @@ def compute_overlay_from_event(ev: dict):
         "changwat": changwat or "-",
         "lat": float(round(lat, 1)),
         "lon": float(round(lon, 1)),
-        "mag_api": float(mag),
+        "mag": float(mag),          # เพิ่ม: เพื่อความเข้ากันได้กับฝั่งหน้าเว็บ
+        "mag_api": float(mag),      # คงเดิม
         "depth_km": float(depth),
         "pga_max": float(round(pga_max, 2)),
-        "center_name": center_name
     }
 
     return {
@@ -380,7 +366,8 @@ def compute_overlay_from_event(ev: dict):
         "image_data_url": data_url,
         "popup_html": popup_html,
         "meta": meta,
-        "pga_points": pga_points
+        "pga_points": pga_points,
+        "legend": legend
     }
 
 def run_pipeline():
@@ -389,3 +376,31 @@ def run_pipeline():
         raise RuntimeError("ไม่พบเหตุการณ์จาก TMD หรือโครงสร้างหน้าเว็บเปลี่ยนไป")
     result = compute_overlay_from_event(ev)
     return result
+
+
+# ===================== เพิ่มสำหรับ "เหตุการณ์จำลอง" =====================
+def _now_th_str():
+    """เวลาปัจจุบันโซนไทย (UTC+7) ในฟอร์แมต YYYY-MM-DD HH:MM:SS"""
+    return (datetime.utcnow() + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
+
+def _now_utc_str():
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+def simulate_event(lat: float, lon: float, depth_km: float, mag: float, region_text: str | None = None):
+    """
+    สร้างเหตุการณ์จำลอง แล้วเรียก compute_overlay_from_event() คืนผลลัพธ์รูปแบบเดียวกับ /api/run
+    """
+    ev = {
+        "lat": float(lat),
+        "lon": float(lon),
+        "depth": float(depth_km),
+        "mag": float(mag),
+        "region": region_text or f"จำลอง (Lat {lat:.4f}, Lon {lon:.4f})",
+        "time_th": _now_th_str(),
+        "time_utc": _now_utc_str()
+    }
+    return compute_overlay_from_event(ev)
+
+def run_pipeline_manual(lat: float, lon: float, depth_km: float, mag: float, region_text: str | None = None):
+    """ฟังก์ชันสะดวก ๆ สำหรับเรียกเหตุการณ์จำลองตรง ๆ"""
+    return simulate_event(lat=lat, lon=lon, depth_km=depth_km, mag=mag, region_text=region_text)
