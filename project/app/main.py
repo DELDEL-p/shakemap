@@ -1,32 +1,25 @@
-# project/app/main.py
-from __future__ import annotations
-
-from typing import Annotated, Optional
+from typing import Optional
 from pathlib import Path
-import os
-import sys
+import time, threading
 
 from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
 
-# --------- Import logic ให้ทำงานได้ทั้ง 2 โหมด ---------
-try:
-    # กรณีรันเป็นแพ็กเกจ: uvicorn project.app.main:app
-    from .logic import run_pipeline, simulate_event
-except Exception:
-    # กรณีรันเป็นโมดูลเดี่ยว: uvicorn main:app (ไม่มี parent package)
-    # เติม sys.path ให้มองเห็นไฟล์ logic.py ที่อยู่โฟลเดอร์เดียวกัน
-    here = Path(__file__).resolve().parent
-    if str(here) not in sys.path:
-        sys.path.insert(0, str(here))
-    from logic import run_pipeline, simulate_event  # type: ignore
+# ==== ดึงฟังก์ชันจาก logic.py ของโปรเจกคุณ ====
+# - fetch_latest_event_in_thailand() : ดึงเมตาเหตุการณ์ล่าสุด
+# - compute_overlay_from_event(ev)   : คำนวณ/สร้างผลลัพธ์แผนที่จาก ev
+# - simulate_event(lat, lon, depth_km, mag) : จำลองเหตุการณ์
+from .logic import (
+    fetch_latest_event_in_thailand,
+    compute_overlay_from_event,
+    simulate_event,
+)
 
-app = FastAPI(title="Quake PGA Web", version="1.0.0")
+app = FastAPI(title="SHAKEMAP API", version="1.2.0")
 
-# --------- CORS ---------
+# CORS (เปิดกว้างสำหรับ dev)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -35,59 +28,81 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------- Static mounting (หา static อย่างฉลาด) ---------
 BASE_DIR = Path(__file__).resolve().parent
-
-def resolve_static_dir() -> Path:
-    # ลำดับการค้นหา:
-    candidates: list[Path | str | None] = [
-        os.getenv("STATIC_DIR"),           # ให้ override ได้ด้วย env var
-        BASE_DIR / "static",               # ./static ข้างไฟล์ main.py
-        BASE_DIR.parent / "static",        # ../static
-        Path.cwd() / "static",             # ./static จาก working dir
-    ]
-    for p in candidates:
-        if not p:
-            continue
-        pth = Path(p)
-        if pth.exists() and pth.is_dir():
-            return pth
-    # fallback สุดท้าย (อาจมี/ไม่มี)
-    return BASE_DIR / "static"
-
-STATIC_DIR = resolve_static_dir()
+STATIC_DIR = BASE_DIR / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# --------- Routes ---------
+
+# ================== In-memory Cache (คำนวณครั้งแรก) ==================
+_CACHE_LOCK = threading.Lock()
+_CACHE = {
+    "data": None,        # JSON ผลลัพธ์เต็ม (รวม data URL/HTML/เมตา)
+    "event_key": None,   # คีย์อ้างอิงเหตุการณ์ล่าสุดที่คำนวณแล้ว
+    "ts": 0.0,           # เวลาที่คำนวณ (epoch)
+}
+
+# ตั้ง TTL ถ้าอยากให้รีเฟรชอัตโนมัติเมื่อพ้นเวลา; None = ไม่หมดอายุเอง
+CACHE_TTL_SEC: Optional[int] = None  # เช่น 600 = 10 นาที
+
+def _make_event_key(meta: dict) -> str:
+    return f"{meta.get('time_utc') or meta.get('time_th')}|{meta.get('lat')}|{meta.get('lon')}|{meta.get('mag')}|{meta.get('depth_km')}"
+
+def _get_cached_ok() -> bool:
+    if _CACHE["data"] is None:
+        return False
+    if CACHE_TTL_SEC is None:
+        return True
+    return (time.time() - (_CACHE["ts"] or 0)) < CACHE_TTL_SEC
+
+def _compute_and_store() -> dict:
+    """คำนวณผลจากเหตุการณ์ล่าสุด แล้วเก็บลงแคช (ต้องเรียกภายใต้ LOCK)"""
+    ev = fetch_latest_event_in_thailand()
+    data = compute_overlay_from_event(ev)
+    meta = data.get("meta", {})
+    _CACHE["data"] = data
+    _CACHE["event_key"] = _make_event_key(meta)
+    _CACHE["ts"] = time.time()
+    return data
+
+def _get_or_compute(force: bool = False) -> dict:
+    # ถ้ามีแคชและไม่ force -> คืนเลย
+    if not force and _get_cached_ok():
+        return _CACHE["data"]
+    # กันชนกัน
+    with _CACHE_LOCK:
+        # เช็กซ้ำใน critical section กัน race
+        if not force and _get_cached_ok():
+            return _CACHE["data"]
+        return _compute_and_store()
+
+
+# ================== Routes ==================
+
 @app.get("/")
 def index():
-    index_file = STATIC_DIR / "index.html"
-    if index_file.exists():
-        return FileResponse(str(index_file))
-    # ถ้าไม่มี index.html จะไม่ให้แครช และบอกตำแหน่งที่หาไฟล์อยู่
-    hint = f"<code>{STATIC_DIR}</code>"
-    return HTMLResponse(
-        f"""
-        <html>
-          <head><title>Quake PGA Web</title></head>
-          <body style="font-family:ui-sans-serif,system-ui,Segoe UI,Roboto">
-            <h2>index.html not found</h2>
-            <p>ระบบกำลังมองหาไฟล์ที่ {hint}</p>
-            <p>ตรวจสอบว่าได้วาง <b>index.html</b> ถูกโฟลเดอร์แล้วหรือยัง
-               หรือกำหนดตัวแปรแวดล้อม <b>STATIC_DIR</b> ให้ถูกทาง</p>
-            <p>API สุขภาพ: <a href="/api/health">/api/health</a></p>
-            <p>เอกสาร: <a href="/docs">/docs</a></p>
-          </body>
-        </html>
-        """,
-        status_code=200,
-    )
+    # เสิร์ฟหน้าเว็บ
+    return FileResponse(str(STATIC_DIR / "index.html"))
 
-# --- /api/run รองรับ simulate ผ่าน body.mode === "simulate" ---
-@app.post("/api/run")
-def api_run(body: Optional[dict] = Body(default=None)):
+# GET สำหรับเปิดในเบราว์เซอร์/เทส
+@app.get("/api/run")
+def api_run_get():
     try:
-        if body and body.get("mode") == "simulate":
+        data = _get_or_compute(force=False)
+        return JSONResponse(data)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+# POST ใช้งานจริงจากหน้าเว็บ
+@app.post("/api/run")
+def api_run(body: dict = Body(default_factory=dict)):
+    """
+    โหมดปกติ: POST /api/run  (body ว่างก็ได้)
+    โหมดจำลอง: POST /api/run { "mode":"simulate", "lat":..., "lon":..., "depth":..., "mag":... }
+    บังคับรีเฟรช: POST /api/run { "force": true }
+    """
+    try:
+        # โหมดจำลอง
+        if body.get("mode") == "simulate":
             lat   = float(body["lat"])
             lon   = float(body["lon"])
             depth = float(body["depth"])
@@ -95,33 +110,40 @@ def api_run(body: Optional[dict] = Body(default=None)):
             data = simulate_event(lat=lat, lon=lon, depth_km=depth, mag=mag)
             return JSONResponse(data)
 
-        # ปกติ: ดึงเหตุการณ์ล่าสุดจาก TMD
-        data = run_pipeline()
+        force = bool(body.get("force"))
+        data = _get_or_compute(force=force)
         return JSONResponse(data)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# --- /api/simulate ไว้เรียกตรงจาก frontend ได้โดยไม่ผ่าน /api/run ---
-class SimRequest(BaseModel):
-    lat:   Annotated[float, Field(ge=-90,  le=90)]
-    lon:   Annotated[float, Field(ge=-180, le=180)]
-    depth: Annotated[float, Field(ge=0,    le=700)]
-    mag:   Annotated[float, Field(ge=1,    le=10)]
+# รีเฟรชเหตุการณ์ล่าสุดแบบบังคับ (สำหรับแอดมิน/DevTools)
+@app.post("/api/refresh")
+def api_refresh():
+    try:
+        data = _get_or_compute(force=True)
+        return JSONResponse({"ok": True, "meta": data.get("meta", {}), "event_key": _CACHE["event_key"]})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+# ดูสถานะแคช (debug)
+@app.get("/api/cache_state")
+def api_cache_state():
+    return {
+        "has_cache": _CACHE["data"] is not None,
+        "event_key": _CACHE["event_key"],
+        "ts": _CACHE["ts"],
+        "ttl_sec": CACHE_TTL_SEC,
+    }
 
 @app.post("/api/simulate")
-def api_simulate(req: SimRequest):
+def api_simulate(body: dict = Body(...)):
     try:
-        data = simulate_event(
-            lat=float(req.lat),
-            lon=float(req.lon),
-            depth_km=float(req.depth),
-            mag=float(req.mag),
-        )
+        lat   = float(body["lat"])
+        lon   = float(body["lon"])
+        depth = float(body["depth"])
+        mag   = float(body["mag"])
+        data = simulate_event(lat=lat, lon=lon, depth_km=depth, mag=mag)
         return JSONResponse(data)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
-
-@app.get("/api/health")
-def health():
-    return {"status": "ok"}
 
