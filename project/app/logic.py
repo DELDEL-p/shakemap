@@ -404,3 +404,31 @@ def simulate_event(lat: float, lon: float, depth_km: float, mag: float, region_t
 def run_pipeline_manual(lat: float, lon: float, depth_km: float, mag: float, region_text: str | None = None):
     """ฟังก์ชันสะดวก ๆ สำหรับเรียกเหตุการณ์จำลองตรง ๆ"""
     return simulate_event(lat=lat, lon=lon, depth_km=depth_km, mag=mag, region_text=region_text)
+
+# PGA (%g) → MMI (Worden+2012)
+PGA_THRESH = [0.05, 0.3, 2.8, 6.2, 12, 22, 40, 75, 139]
+MMI_CODES  = ["I","II–III","IV","V","VI","VII","VIII","IX","X","X+"]
+TH_SHAKING = ["ไม่รู้สึก","อ่อนมาก–อ่อน","อ่อน","ปานกลาง","ค่อนข้างแรง",
+              "แรงมาก","รุนแรง","รุนแรงมาก","รุนแรงมาก (Violent)","รุนแรงที่สุด (Extreme)"]
+TH_DAMAGE  = ["ไม่มี","ไม่มี","ไม่มี","เบามาก","เบา","ปานกลาง",
+              "ปานกลาง/หนัก","หนัก","หนักมาก","หนักมากที่สุด"]
+
+def mmi_from_pga(pga_percent_g: float):
+    """รับค่า PGA เป็นหน่วย %g แล้วคืน dict ข้อมูล MMI"""
+    idx = 0
+    while idx < len(PGA_THRESH) and pga_percent_g >= PGA_THRESH[idx]:
+        idx += 1
+    code   = MMI_CODES[idx]
+    shake  = TH_SHAKING[idx]
+    damage = TH_DAMAGE[idx]
+    lower  = 0 if idx == 0 else PGA_THRESH[idx-1]
+    upper  = float("inf") if idx == len(PGA_THRESH) else PGA_THRESH[idx]
+    range_text = f"< {PGA_THRESH[0]}%g" if idx == 0 else (f"≥ {lower}%g" if upper == float("inf") else f"{lower}–{upper}%g")
+    return {
+        "code": code,
+        "shake_th": shake,
+        "damage_th": damage,
+        "range_text": range_text,
+        "bin_index": idx
+    }
+
