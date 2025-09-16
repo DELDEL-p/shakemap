@@ -31,8 +31,7 @@ html,body{
 
 /* ---- Searchbox ---- */
 .searchbox{
-  position:relative;
-  display:flex; align-items:center;
+  position:relative; display:flex; align-items:center;
   width:70%; max-width:250px;
   background:#fff; border-radius:28px; border:1px solid var(--border);
   overflow:visible; box-shadow:var(--shadow-1);
@@ -68,24 +67,20 @@ html,body{
   color:#5f6368; white-space:nowrap; text-overflow:ellipsis; overflow:hidden; max-width:300px;
 }
 
-/* ---- Nickname box ---- */
-.nickbox{
-  display:flex; align-items:center; gap:8px;
-  background:#fff; border:1px solid var(--border); border-radius:28px;
-  padding:6px 8px; box-shadow:var(--shadow-1);
-  max-width:260px;
+/* ---- Nickname: Chip ---- */
+.nickbox{ display:none !important; } /* ซ่อนของเดิม */
+.chip-btn{
+  display:inline-flex; align-items:center; gap:8px;
+  background:#fff; color:var(--prim);
+  border:1px solid var(--border); border-radius:999px; padding:8px 12px;
+  box-shadow:var(--shadow-1); cursor:pointer; font-weight:600;
+  transition:background .18s ease, transform .06s ease, color .18s ease;
 }
-.nickbox input{
-  flex:1 1 auto; min-width:0; border:0; outline:0; background:transparent;
-  font-size:14px; padding:6px 4px 6px 8px;
-}
-.nickbox button{
-  border:0; border-radius:20px; padding:6px 12px; cursor:pointer;
-  background:#eef4ff; color:var(--prim);
-}
-.nickbox button:hover{ background:#e1ecff }
+.chip-btn:hover{ background:#eef4ff; color:var(--prim-strong) }
+.chip-btn:active{ transform: translateY(1px) }
+.chip-btn:focus-visible{ outline:3px solid rgba(66,133,244,.25); outline-offset:2px }
 
-/* ---- Top-right buttons ---- */
+/* ---- Top-right buttons (ถาดพับเก็บได้) ---- */
 .top-right-buttons{
   position:fixed;
   top:calc(env(safe-area-inset-top, 0px) + 12px);
@@ -97,11 +92,24 @@ html,body{
   width:42px; height:42px; border-radius:50%;
   border:0; background:#fff; color:var(--prim); cursor:pointer;
   box-shadow:var(--shadow-1);
-  transition:background .18s ease, transform .06s ease, color .18s ease;
+  transition:background .18s ease, transform .14s ease, color .18s ease, opacity .14s ease;
+  will-change: transform, opacity;
 }
 .icon-btn:hover{ background:#eef4ff; color:var(--prim-strong) }
 .icon-btn:active{ transform: translateY(1px) }
+.icon-btn:focus-visible{ outline:3px solid rgba(66,133,244,.25) }
 .icon-btn svg{ width:20px; height:20px }
+
+/* ปุ่ม toggle ของถาด */
+.tray-toggle i{ transition:transform .18s ease; }
+
+/* สถานะพับเก็บ: ซ่อนปุ่มอื่นๆ พร้อมแอนิเมชันลื่นๆ */
+.top-right-buttons.collapsed .icon-btn:not(.tray-toggle){
+  opacity:0; transform: translateX(14px) scale(.9);
+  pointer-events:none;
+  height:0; width:0; margin:0; padding:0; border-width:0;
+  box-shadow:none; overflow:hidden;
+}
 
 /* ========== Toast (มุมซ้ายล่าง) ========== */
 .toast{
@@ -114,7 +122,7 @@ html,body{
 /* ========== Leaflet cosmetics ========== */
 .leaflet-control-zoom{ display:block !important; }
 .leaflet-bottom.leaflet-right .leaflet-control{
-  margin:0 12px 12px 0 !important; /* ระยะขวาล่าง */
+  margin:0 12px 12px 0 !important;
 }
 
 /* ========== Severity text colors ========== */
@@ -128,23 +136,22 @@ html,body{
   left:12px;
   bottom:calc(64px + env(safe-area-inset-bottom, 0px));
   z-index:1002;
-
   padding:10px 12px;
-  width:220px;   /* กะทัดรัดพอดีสายตา */
+  width:220px;
 }
 .legend-title{
-  font-weight:600; 
-  font-size:12px; color:#000; 
+  font-weight:600;
+  font-size:12px; color:#000;
   margin-bottom:2px;
 }
 .legend-bar{ height:10px; }
 .legend-labels{
-  display:flex; justify-content:space-between; 
-  font-size:12px; color:#000; 
+  display:flex; justify-content:space-between;
+  font-size:12px; color:#000;
   margin-top:2px;
 }
 
-/* ========== Modal (simulate) ========== */
+/* ========== Modal (simulate / generic) ========== */
 .modal-backdrop{
   position:fixed; inset:0; z-index:2002;
   display:flex; align-items:center; justify-content:center;
@@ -155,12 +162,21 @@ html,body{
   background:#fff; border:1px solid var(--border); border-radius:16px;
   box-shadow:var(--shadow-2); width:340px; max-width:calc(100% - 24px);
   padding:12px 14px;
+  position:relative;             /* ปุ่ม X วางบนหัวมุม */
 }
-.modal-title{ margin:4px 2px 12px; font-weight:600; font-size:18px }
+.modal-title{
+  margin:4px 2px 12px; font-weight:600; font-size:18px;
+  padding-right:46px;             /* กันชนปุ่ม X */
+}
 .modal-body .row{ display:flex; flex-direction:column; gap:6px; margin-bottom:10px }
 .modal-body label{ font-size:13px; color:#444 }
 .modal-body input{
-  width:100%; border:1px solid var(--border); border-radius:10px; padding:10px 12px; font-size:14px;
+  width:100%;
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:10px 12px;
+  font-size:16px;
+  line-height:1.4;
 }
 .modal-body input:focus{
   outline:none; border-color:#e0e3e7;
@@ -176,20 +192,40 @@ html,body{
 .btn-secondary{ background:#f1f3f4; color:#202124 }
 .btn-secondary:hover{ background:#e8eaed }
 
+/* ปุ่ม X มุมขวาบนของโมดัล */
+.modal-close{
+  position:absolute; top:10px; right:12px;
+  width:36px; height:36px; border:0; border-radius:50%;
+  background:transparent; color:#5f6368; cursor:pointer;
+  display:inline-flex; align-items:center; justify-content:center;
+  transition:background .18s ease, color .18s ease, transform .06s ease;
+}
+.modal-close:hover{ background:#f1f3f4; color:#202124; }
+.modal-close:active{ transform: translateY(1px); }
+.modal-close:focus-visible{ outline:3px solid rgba(66,133,244,.25) }
+.modal-close i{ font-size:18px; line-height:1; }
+
 /* ========== Responsive tweaks ========== */
+@media (min-width: 721px){
+  .searchbox{ max-width:360px; }
+}
 @media (max-width: 720px){
   .controls{ left:10px; right:10px; padding:8px; gap:8px }
-  .searchbox{ max-width:100% }
+  .controls-row{ gap:8px }
+  .searchbox{ max-width:66% }
   .searchbox input{ font-size:16px; padding:12px 12px }
   .searchbox button{ min-width:68px; padding:0 12px }
   .ac{ max-height:40vh }
   .legend{ width:200px }
-  .nickbox{ max-width:100% }
+  .modal-close{ top:8px; right:8px; } /* แตะง่ายขึ้นบนมือถือ */
 }
-/* ใส่ใน style.css */
-/* ซ่อนของช่างเป็นค่าเริ่มต้น */
-.ops-only { display: none !important; }
 
-/* พอเข้าโหมดช่างให้แสดง */
-.ops-mode .ops-only { display: inline-flex !important; }  /* หรือ block ตามปุ่มของคุณ */
+/* โหมดช่าง */
+.ops-only { display: none !important; }
+.ops-mode .ops-only { display: inline-flex !important; }
+
+@supports (-webkit-touch-callout: none){
+  input, select, textarea { font-size:16px !important; }
+}
+
 
