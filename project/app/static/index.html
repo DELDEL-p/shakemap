@@ -11,45 +11,38 @@
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
         crossorigin />
-  <link rel="stylesheet" href="/static/style.css?v=3">
+  <link rel="stylesheet" href="/static/style.css?v=4">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
 
-  <!-- ซ่อน/แสดงปุ่ม ops-only + สไตล์เสริม -->
+  <!-- ซ่อน/แสดงปุ่ม ops-only + เสริมเล็กน้อย -->
   <style>
     .ops-only { display: none !important; }
     .ops-mode .ops-only { display: inline-flex !important; }
 
-    /* Badge MMI */
     .mmi-chip{
       display:inline-block; padding:6px 10px; border-radius:10px; font-weight:700;
       box-shadow: inset 0 0 0 2px rgba(0,0,0,.08);
       color:#000; cursor:pointer; user-select:none;
     }
-    .mmi-sub{ display:block; font-size:12px; opacity:.9; margin-top:4px; }
+    .mmi-sub{ display:block; font-size:16px; opacity:.9; margin-top:4px; }
 
-    /* Modal รายละเอียด MMI */
-    .modal-backdrop{ position:fixed; inset:0; background:rgba(0,0,0,.35); display:none; align-items:center; justify-content:center; z-index:10000; }
-    .modal{ width:min(520px, 92vw); background:#fff; border-radius:14px; box-shadow:0 10px 30px rgba(0,0,0,.2); overflow:hidden; }
-    .modal-title{ font-size:18px; margin:0; padding:14px 18px; border-bottom:1px solid #eee; }
-    .modal-body{ padding:14px 18px; }
-    .modal-actions{ display:flex; gap:10px; justify-content:flex-end; padding:0 18px 16px; }
-    .btn-primary{ background:#0d6efd; color:#fff; border:0; border-radius:10px; padding:8px 14px; cursor:pointer; }
-    .btn-secondary{ background:#eee; color:#333; border:0; border-radius:10px; padding:8px 14px; cursor:pointer; }
-
-    /* Chip (ตั้งชื่อเล่น) */
-    .chip-btn{
-      display:inline-flex; align-items:center; gap:8px;
-      background:#fff; color:#4285f4;
-      border:1px solid #dadce0; border-radius:999px; padding:8px 12px;
-      box-shadow:0 2px 10px rgba(0,0,0,.12); cursor:pointer; font-weight:600;
-      transition:background .18s ease, transform .06s ease, color .18s ease;
-    }
-    .chip-btn:hover{ background:#eef4ff; color:#174ea6 }
-    .chip-btn:active{ transform: translateY(1px) }
-
-    /* ==== เสริมสำหรับปุ่มพับ/กางถาดมุมขวา ==== */
     .tray-toggle i{ transition:transform .18s ease; }
     .top-right-buttons.collapsed .icon-btn:not(.tray-toggle){ display:none; }
+
+    /* 🔍 เพิ่มสไตล์สำหรับค้นหาในโมดอลจำลอง */
+    .sim-tools .row { display:flex; gap:8px; }
+    .sim-tools input[type="text"]{ flex:1; }
+    .sim-results{
+      margin-top:8px; max-height:200px; overflow:auto;
+      border:1px solid #e5e8ee; border-radius:10px; display:none; background:#fff;
+    }
+    .sim-results .item{
+      padding:8px 10px; border-bottom:1px dashed #eee; cursor:pointer;
+    }
+    .sim-results .item:last-child{ border-bottom:0; }
+    .sim-results .item:hover{ background:rgba(0,0,0,.04); }
+    .btn-outline { padding:8px 12px; border-radius:12px; background:transparent; border:1px dashed #b6bed0; cursor:pointer; }
+    .hint { color:#667085; }
   </style>
 
   <!-- Firebase (Compat v9) -->
@@ -58,6 +51,139 @@
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
 </head>
 <body>
+  <script>
+// ===== รายการตัวเลือกสากลเวลาบรรเทาภัยพิบัติ =====
+const NEED_OPTIONS = [
+  {value:'medical',     label:'การแพทย์/ยา'},
+  {value:'food',        label:'อาหาร/เสบียง'},
+  {value:'water',       label:'น้ำดื่ม'},
+  {value:'shelter',     label:'ที่พักพิง/ผ้าห่ม'},
+  {value:'rescue',      label:'ค้นหาและกู้ภัย'},
+  {value:'evac',        label:'อพยพ/ขนย้าย'},
+  {value:'power',       label:'ไฟฟ้า/ชาร์จไฟ'},
+  {value:'comms',       label:'การสื่อสาร/สัญญาณ'},
+  {value:'sanitation',  label:'สุขอนามัย/ห้องน้ำ'},
+  {value:'transport',   label:'การเดินทาง/เชื้อเพลิง'},
+  {value:'special',     label:'ผู้สูงอายุ/เด็ก/ผู้พิการ'},
+  {value:'pets',        label:'สัตว์เลี้ยง/ปศุสัตว์'},
+  {value:'psych',       label:'การช่วยเหลือด้านจิตใจ'}
+];
+
+function needLabel(v){ const o = NEED_OPTIONS.find(x=>x.value===v); return o?o.label:v; }
+
+function initNeedDropdown(){
+  const dd = document.getElementById('needDropdown');
+  if(!dd) return;
+  const ul = dd.querySelector('.need-dd-list');
+  ul.innerHTML = '';
+  NEED_OPTIONS.forEach(o=>{
+    const li = document.createElement('li');
+    li.innerHTML = `<label><input type="checkbox" value="${o.value}"><span>${o.label}</span></label>`;
+    ul.appendChild(li);
+  });
+
+  // preload จาก localStorage
+  try{
+    const saved = JSON.parse(localStorage.getItem('shakemapProfile')||'{}');
+    if(saved.needs && Array.isArray(saved.needs)){
+      ul.querySelectorAll('input[type=checkbox]').forEach(cb=>{
+        cb.checked = saved.needs.includes(cb.value);
+      });
+      updateNeedToggleText();
+    }
+  }catch(e){}
+
+  // events
+  const toggleBtn = dd.querySelector('.need-dd-toggle');
+  const search = dd.querySelector('.need-dd-search input');
+  const clearBtn = dd.querySelector('.need-dd-clear');
+  const doneBtn = dd.querySelector('.need-dd-done');
+
+  toggleBtn.addEventListener('click', ()=>{
+    const open = dd.getAttribute('data-open') === 'true';
+    dd.setAttribute('data-open', String(!open));
+    toggleBtn.setAttribute('aria-expanded', String(!open));
+  });
+
+  document.addEventListener('click', (e)=>{
+    if(!dd.contains(e.target)){
+      dd.setAttribute('data-open','false');
+      toggleBtn.setAttribute('aria-expanded','false');
+    }
+  });
+
+  ul.addEventListener('change', updateNeedToggleText);
+
+  search.addEventListener('input', ()=>{
+    const q = search.value.trim().toLowerCase();
+    ul.querySelectorAll('li').forEach(li=>{
+      const text = li.textContent.toLowerCase();
+      li.style.display = text.includes(q) ? '' : 'none';
+    });
+  });
+
+  clearBtn.addEventListener('click', ()=>{
+    ul.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.checked=false);
+    updateNeedToggleText();
+  });
+  doneBtn.addEventListener('click', ()=>{
+    dd.setAttribute('data-open','false');
+    toggleBtn.setAttribute('aria-expanded','false');
+  });
+}
+
+function getSelectedNeeds(){
+  const dd = document.getElementById('needDropdown');
+  if(!dd) return [];
+  return Array.from(dd.querySelectorAll('input[type=checkbox]:checked')).map(i=>i.value);
+}
+
+function updateNeedToggleText(){
+  const dd = document.getElementById('needDropdown');
+  if(!dd) return;
+  const placeholder = dd.querySelector('.need-dd-placeholder');
+  const counter = dd.querySelector('.need-dd-count');
+  const selected = getSelectedNeeds();
+  if(selected.length === 0){
+    placeholder.textContent = 'เลือกความช่วยเหลือ…';
+    counter.hidden = true;
+  }else if(selected.length <= 2){
+    placeholder.textContent = selected.map(needLabel).join(', ');
+    counter.hidden = true;
+  }else{
+    placeholder.textContent = 'เลือกแล้ว';
+    counter.hidden = false;
+    counter.textContent = selected.length;
+  }
+}
+
+/* ==== บันทึกชื่อเล่น + ความต้องการ ==== */
+function saveNicknameAndNeeds(){
+  const nickEl = document.getElementById('nickModalInput');
+  const nickname = nickEl ? nickEl.value.trim() : '';
+
+  // อ่านค่าจาก checkbox ทั้งหมด
+  const checked = Array.from(document.querySelectorAll('input[name="needs"]:checked')).map(cb => cb.value);
+  const otherText = document.getElementById('needOtherInput')?.value.trim();
+  if (otherText) checked.push(otherText);
+
+  const profile = { nickname, needs: checked };
+  localStorage.setItem('shakemapProfile', JSON.stringify(profile));
+
+  try{ updateUserMarkerPopup && updateUserMarkerPopup(); }catch(e){}
+  document.getElementById('nickModal')?.style.setProperty('display', 'none');
+}
+
+
+/* ==== Hook เมื่อโหลด ==== */
+document.addEventListener('DOMContentLoaded', ()=>{
+  initNeedDropdown();
+  const btn = document.getElementById('nicknameSaveBtn') || document.querySelector('.nickname-save');
+  if(btn) btn.addEventListener('click', saveNicknameAndNeeds);
+});
+</script>
+
+
   <div class="controls">
     <div class="controls-row">
       <!-- Search -->
@@ -69,14 +195,13 @@
         <ul id="acList" class="ac"></ul>
       </div>
 
-      <!-- Nickname: ใช้ชิป + โมดัล (แทนกล่องเดิม) -->
-      <button id="nickChip" class="chip-btn" type="button" title="ตั้งชื่อเล่น">
-        <span id="nickChipLabel">ตั้งชื่อเล่น</span>
+      <!-- Nickname -->
+      <button id="nickChip" class="chip-btn" type="button" title="SOS">
+        <span id="nickChipLabel">SOS</span>
       </button>
 
       <!-- ปุ่มลอยขวาบน -->
       <div class="top-right-buttons">
-        <!-- ปุ่มพับ/กางถาด -->
         <button id="trayToggle" class="icon-btn tray-toggle" title="ซ่อนเมนู" aria-label="ซ่อนเมนู" aria-expanded="true">
           <i class="fa-solid fa-chevron-right"></i>
         </button>
@@ -91,7 +216,7 @@
           <i class="fa-solid fa-house-crack"></i>
         </button>
 
-        <button id="simulateBtn" class="icon-btn" title="จำลองเหตุการณ์" aria-label="จำลองเหตุการณ์">
+        <button id="simulateBtn" class="icon-btn" title="ไปหน้าจำลอง (เปิดแท็บใหม่)" aria-label="ไปหน้าจำลอง (เปิดแท็บใหม่)">
           <i class="fa-solid fa-wave-square"></i>
         </button>
 
@@ -112,22 +237,32 @@
     <div class="legend-labels"></div>
   </div>
 
-  <!-- Modal: ตั้งชื่อเล่น -->
+  <!-- Modal: SOS -->
   <div id="nickModal" class="modal-backdrop" style="display:none">
     <div class="modal">
-      <!-- ปุ่ม X -->
       <button type="button" id="nickCloseX" class="modal-close" aria-label="ปิด">
         <i class="fa-solid fa-xmark" aria-hidden="true"></i>
       </button>
 
-      <h3 class="modal-title">ตั้งชื่อเล่น</h3>
+      <h3 class="modal-title">SOS</h3>
       <form id="nickForm" class="modal-body">
         <div class="row">
           <label>ชื่อเล่นของฉัน
-            <input id="nickModalInput" type="text" maxlength="24" placeholder="เช่น นัท">
+            <input id="nickModalInput" type="text" maxlength="24" placeholder="">
           </label>
         </div>
-        <div class="modal-actions">
+        <!-- ต้องการความช่วยเหลือ (Dropdown แบบหลายตัวเลือก) -->
+        <div class="field-group">
+          <label class="label">ต้องการความช่วยเหลือ</label>
+          <div class="need-checklist">
+            <label><input type="checkbox" name="needs" value="medical"> การแพทย์/ยา</label>
+            <label><input type="checkbox" name="needs" value="food"> อาหาร/เสบียง</label>
+            <label><input type="checkbox" name="needs" value="water"> น้ำดื่ม</label>
+          
+            <input type="text" id="needOtherInput" placeholder="พิมพ์เพิ่มเติม...">
+          </div>
+        </div
+                <div class="modal-actions">
           <button type="button" id="nickCancel" class="btn-secondary">ยกเลิก</button>
           <button type="submit" class="btn-primary">บันทึก</button>
         </div>
@@ -138,7 +273,6 @@
   <!-- Modal: จำลองเหตุการณ์ -->
   <div id="simulateModal" class="modal-backdrop" style="display:none">
     <div class="modal">
-      <!-- ปุ่ม X -->
       <button type="button" id="simCloseX" class="modal-close" aria-label="ปิด">
         <i class="fa-solid fa-xmark" aria-hidden="true"></i>
       </button>
@@ -165,8 +299,13 @@
             <input id="simMag" type="number" step="0.1" min="1" max="10" required placeholder="เช่น 5.5">
           </label>
         </div>
+        <!-- 🗺️ เลือกพิกัดจากการคลิกบนแผนที่ -->
+        <div class="sim-tools" style="margin-top:10px">
+          <button type="button" id="simPickBtn" class="btn-outline">กดเพื่อเลือกพิกัดจากแผนที่</button>
+          <div class="hint" style="margin-top:6px">หลังจากกดปุ่มนี้ ให้คลิกบนแผนที่ 1 ครั้ง ระบบจะกรอก Latitude/Longitude ให้อัตโนมัติ</div>
+        </div>
 
-        <div class="modal-actions">
+        <div class="modal-actions" style="margin-top:14px">
           <button type="button" id="simCancel" class="btn-secondary">ยกเลิก</button>
           <button type="submit" id="simSubmit" class="btn-primary">คำนวณ</button>
         </div>
@@ -210,12 +349,68 @@
     </div>
   </div>
 
+  <!-- Modal: รอคิวเข้าใช้งาน -->
+  <div id="queueModal" class="modal-backdrop" style="display:none">
+    <div class="modal">
+      <h3 class="modal-title">คนใช้งานเต็มอยู่ กำลังเข้าคิว…</h3>
+      <div class="modal-body">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <div class="spinner" aria-hidden="true"></div>
+          <div id="queueText" class="queue-text">กำลังเข้าคิว…</div>
+        </div>
+        <div class="queue-metrics">
+          <div class="metric">กำลังใช้งาน: <b id="qActive">-</b></div>
+          <div class="metric">จำกัด: <b id="qLimit">10</b></div>
+        </div>
+        <div style="margin-top:8px">
+          คิวของคุณ: <span id="queuePosition" class="queue-pos">#–</span>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="queueLeave" class="btn-secondary">ออกจากคิว</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Leaflet JS -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin></script>
 
   <script>
+    /* === Overlay color mapping (จาก legend) === */
+    let currentLegend = null;
+
+    function hexToRgb(hex){
+      const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex||"");
+      if(!m) return {r:0,g:0,b:0};
+      return { r: parseInt(m[1],16), g: parseInt(m[2],16), b: parseInt(m[3],16) };
+    }
+
+    function colorForPGAFromLegend(pga){
+      const L = currentLegend;
+      if(!L || !L.stops || L.stops.length < 2) return '#000';
+      const min = +L.min, max = +L.max;
+      const span = (max - min) || 1e-9;
+      let t = (pga - min) / span;
+      if(!isFinite(t)) t = 0;
+      t = Math.max(0, Math.min(1, t));
+
+      const N = L.stops.length;
+      const x = t * (N - 1);
+      const i = Math.floor(x);
+      if (i >= N - 1) return L.stops[N - 1].color;
+
+      const f = x - i;
+      const c1 = hexToRgb(L.stops[i].color);
+      const c2 = hexToRgb(L.stops[i+1].color);
+      const r = Math.round(c1.r + f*(c2.r - c1.r));
+      const g = Math.round(c1.g + f*(c2.g - c1.g));
+      const b = Math.round(c1.b + f*(c2.b - c1.b));
+      return `rgb(${r},${g},${b})`;
+    }
+
+
     /* ---------------- Helpers ---------------- */
     function toast(msg, isError=false){
       const t = document.getElementById('toast');
@@ -268,20 +463,23 @@
     /* ---------------- PGA → MMI (Worden+2012) ---------------- */
     const PGA_THRESH = [0.05, 0.3, 2.8, 6.2, 12, 22, 40, 75, 139];
     const MMI_CODES  = ["I","II–III","IV","V","VI","VII","VIII","IX","X","X+"];
-    const MMI_COLORS = ["#ffffff","#cfe8ff","#99e1a5","#d6f06f","#ffe066","#ffbf59","#ff9b5a","#ff6b57","#e53935","#b71c1c"];
+    const MMI_COLORS = [
+      "#efeaff","#cfd8ff","#66ccff","#6bd86b","#d6f24a",
+      "#ffe066","#ff9b40","#ff4d3a","#d8222a","#990000"
+    ];
     const TH_SHAKING = ["ไม่รู้สึก","อ่อนมาก–อ่อน","อ่อน","ปานกลาง","ค่อนข้างแรง","แรงมาก","รุนแรง","รุนแรงมาก","รุนแรงมาก (Violent)","รุนแรงที่สุด (Extreme)"];
-    const TH_DAMAGE  = ["ไม่มี","ไม่มี","ไม่มี","เบามาก","เบา","ปานกลาง","ปานกลาง/หนัก","หนัก","หนักมาก","หนักมากที่สุด"];
+    const TH_DAMAGE  = ["ไม่มี","ไม่มี","ไม่มี","มีรอยแตกของผนังและกระจกหน้าต่างบ้างเล็กน้อย","ผนัง/เพดานร่วงหล่นบางจุด หน้าต่างบานเกร็ดแตกหรือร้าว","บ้าน/ตึกแถวที่ก่อสร้างไม่ได้มาตรฐานเริ่มเสียหายหนัก (ผนังแตกร้าว, เสาปูนบางต้นร้าว)","อาคารที่สร้างไม่แข็งแรง (บ้านก่ออิฐไม่เสริมเหล็ก, ตึกแถวเก่า) เสียหายหนัก บางส่วนอาจพังทลาย","อาคาร/บ้านเรือนที่ไม่ได้ออกแบบให้ทนแผ่นดินไหวเสียหายหนัก","อาคาร/บ้านเรือนพังถล่มเกือบทั้งหมด","อาคาร/บ้านเรือนพังถล่ม"];
 
     const MMI_ADVICE = {
-      "I":"ไม่ต้องทำอะไรเพิ่มเติม",
-      "II–III":"ตั้งสติ เฝ้าระวังข่าวสาร",
-      "IV":"อยู่ห่างของตกหล่น ตรวจเส้นทางหนี",
-      "V":"อยู่ใต้โต๊ะ/ที่กำบัง ยึดของที่อาจล้ม",
+      "I":"ยังไม่จำเป็นต้องทำอะไรเป็นพิเศษ เพียงเฝ้าระวังข่าวสาร",
+      "II–III":"ยังไม่จำเป็นต้องทำอะไรเป็นพิเศษ เพียงเฝ้าระวังข่าวสาร",
+      "IV":"อยู่ให้ห่างจากของที่อาจตกหล่น เตรียมเส้นทางหนีออกจากอาคารถ้าจำเป็น",
+      "V":"อยู่ใต้โต๊ะ/ที่กำบัง ยึดของที่อาจล้ม เตรียมเส้นทางหนีออกจากอาคารถ้าจำเป็น",
       "VI":"หลบใต้โต๊ะหรือมุมอาคารที่แข็งแรง เตรียมอพยพหากไม่ปลอดภัย",
       "VII":"ออกจากอาคารเมื่อปลอดภัย ระวังสิ่งของตกหล่น/ไฟฟ้ารั่ว",
       "VIII":"อพยพไปพื้นที่โล่ง หลีกเลี่ยงอาคาร สะพาน เสาไฟ",
-      "IX":"อพยพฉุกเฉิน ช่วยเหลือผู้อื่นหลังปลอดภัยแล้ว",
-      "X":"อพยพทันที ฟังประกาศทางการ",
+      "IX":"อพยพฉุกเฉินทันที ไปยังพื้นที่ปลอดภัย และช่วยเหลือผู้อื่นเมื่อปลอดภัยแล้ว",
+      "X":"อพยพฉุกเฉินทันที ไปยังพื้นที่ปลอดภัย และช่วยเหลือผู้อื่นเมื่อปลอดภัยแล้ว",
       "X+":"อพยพด่วนที่สุด หลีกเลี่ยงพื้นที่เสี่ยงทุกชนิด"
     };
 
@@ -290,10 +488,7 @@
       const lower = idx === 0 ? 0 : PGA_THRESH[idx-1];
       const upper = idx < PGA_THRESH.length ? PGA_THRESH[idx] : Infinity;
       const rangeText = idx === 0 ? `< ${PGA_THRESH[0]}%g` : (upper === Infinity ? `≥ ${lower}%g` : `${lower}–${upper}%g`);
-      return {
-        idx, code:MMI_CODES[idx], color:MMI_COLORS[idx],
-        shake:TH_SHAKING[idx], damage:TH_DAMAGE[idx], rangeText
-      };
+      return { idx, code:MMI_CODES[idx], color:MMI_COLORS[idx], shake:TH_SHAKING[idx], damage:TH_DAMAGE[idx], rangeText };
     }
 
     /* ---------------- PGA Compute ---------------- */
@@ -389,35 +584,62 @@
     }
 
     /* ---------------- Popup: เฉพาะ MMI + ลิงก์รายละเอียด ---------------- */
-    function updateUserMarkerPopup(){
-      if (!searchMarker) return;
-      const latlng = searchMarker.getLatLng();
-      let popup = searchMarker.options.title || '';
-      if (lastEpicenter && latlng){
-        const dist = calcDistanceKm(latlng.lat, latlng.lng, lastEpicenter[0], lastEpicenter[1]);
-        popup += `<br><span>ระยะห่างจากจุดศูนย์กลาง : <b>${dist.toFixed(2)}</b> กม.</span>`;
+    /* ---------------- Popup: เฉพาะ MMI + ลิงก์รายละเอียด ---------------- */
+/* ---------------- Popup: เฉพาะ MMI + ลิงก์รายละเอียด ---------------- */
+/* ---------------- Popup: เฉพาะ MMI + ลิงก์รายละเอียด ---------------- */
+function updateUserMarkerPopup(){
+  if (!searchMarker) return;
 
-        if (lastPGAGrid.length){
-          const pgaObj = findNearestPGA(latlng.lat, latlng.lng, 8);
-          const pgaVal = (pgaObj && pgaObj.pga>0) ? pgaObj.pga : 0;
+  const latlng = searchMarker.getLatLng();
+  let popup = searchMarker.options.title || '';
 
-          const sev = classifySeverity(pgaVal);
-          popup += `<br><span>ค่าระดับการสั่นสะเทือน : <b class="${sev.className}">${pgaVal.toFixed(4)}</b> %g</span>`;
-          popup += `<br><span class="${sev.className}">ระดับการสั่นสะเทือน : ${sev.label}</span>`;
+  if (lastEpicenter && latlng){
+    const dist = calcDistanceKm(latlng.lat, latlng.lng, lastEpicenter[0], lastEpicenter[1]);
+    popup += `<br><span>ระยะห่างจากจุดศูนย์กลาง : <b>${dist.toFixed(2)}</b> กม.</span>`;
 
-          const m = mmiFromPGA(pgaVal);
-          popup += `
-            <br><span>MMI :
-              <a href="#" onclick="return showMMIDetail('${m.code}', ${Number(pgaVal).toFixed(6)})"
-                 class="mmi-chip" style="background:${m.color}; text-decoration:none;">
-                ${m.code}
-              </a>
-            </span>
-          `;
+    if (lastPGAGrid.length){
+      const pgaObj = findNearestPGA(latlng.lat, latlng.lng, 8);
+      const pgaVal = (pgaObj && isFinite(pgaObj.pga) && pgaObj.pga > 0) ? pgaObj.pga : 0;
+
+      const sev = classifySeverity(pgaVal);
+      const m   = mmiFromPGA(pgaVal);
+      const mmiOverlayColor = colorForPGAFromLegend(pgaVal);
+
+      // ถ้า MMI เป็น I หรือ II–III ให้ใช้ "สีน้ำเงินของ MMI IV" แทน เพื่อให้อ่านง่าย
+      const MMI_IV_COLOR = (typeof MMI_COLORS !== 'undefined' && MMI_COLORS[2]) || '#66ccff';
+      const textColor = (m.code === 'I' || m.code === 'II–III') ? MMI_IV_COLOR : m.color;
+
+      // ค่า PGA (%g) และข้อความ "ระดับการสั่นสะเทือน" ใช้ textColor ตามกฎข้างบน
+      popup += `<br><span>ค่าระดับการสั่นสะเทือน : <b style="color:${textColor}">${pgaVal.toFixed(4)}</b> %g</span>`;
+      popup += `<br><span style="color:${textColor}; font-weight:700">ระดับการสั่นสะเทือน : ${sev.label}</span>`;
+
+      // ป้าย MMI (ยังคงใช้สีจริงของ MMI) + เฉดสี overlay
+      popup += `
+        <br><span>MMI :
+          <a href="#"
+             onclick="return showMMIDetail('${m.code}', ${Number(pgaVal).toFixed(6)})"
+             class="mmi-chip"
+             style="background:${m.color}; text-decoration:none;">
+            ${m.code}
+          </a>
+          <span class="pga-chip" style="background:${mmiOverlayColor}" title="เฉดสีแผนที่"></span>
+        </span>
+      `;
+
+      // แสดงความต้องการช่วยเหลือ (ถ้ามี)
+      try{
+        const profile = JSON.parse(localStorage.getItem('shakemapProfile')||'{}');
+        if (profile.needs && profile.needs.length){
+          const chips = profile.needs.map(v=>`<span class="need-chip">${needLabel(v)}</span>`).join(' ');
+          popup += `<br><span>ต้องการความช่วยเหลือ : ${chips}</span>`;
         }
-      }
-      searchMarker.getPopup()?.setContent(popup);
+      }catch(e){}
     }
+  }
+
+  searchMarker.getPopup()?.setContent(popup);
+}
+
 
     function drawUserDistanceLine(){
       if (userDistanceLine) { map.removeLayer(userDistanceLine); userDistanceLine=null; }
@@ -518,6 +740,10 @@
 
     /* ---------------- Locate & Click ---------------- */
     let locateCooldown=false;
+
+    // 🔖 โหมดเลือกพิกัดครั้งเดียวสำหรับโมดอลจำลอง
+    window.__simPickOnce = false;
+
     async function locateMe(){
       if (locateCooldown) return; locateCooldown=true; setTimeout(()=>locateCooldown=false, 2000);
       toast('กำลังค้นหาตำแหน่งของคุณ...');
@@ -540,8 +766,25 @@
     }
     document.getElementById('locateBtn').addEventListener('click', locateMe);
 
-    map.on('click', async e=>{
-      const { lat, lng } = e.latlng;
+        map.on('click', async e => {
+        const { lat, lng } = e.latlng;
+
+        // —— โหมดเลือกพิกัดเพื่อจำลอง: ไม่วางหมุดใดๆ ——
+        if (window.__simPickOnce) {
+          window.__simPickOnce = false;
+          try { map.getContainer().style.cursor = ''; } catch(e){}
+          const simLatEl = document.getElementById('simLat');
+          const simLonEl = document.getElementById('simLon');
+          if (simLatEl && simLonEl) {
+            simLatEl.value = lat.toFixed(4);
+            simLonEl.value = lng.toFixed(4);
+          }
+          toast('เลือกพิกัดสำหรับจำลองแล้ว');
+          const _modal = document.getElementById('simulateModal');
+          if (_modal) _modal.style.display = 'flex'; // เปิดโมดอลกลับมา
+          return; // ←← สำคัญ: จบเลย ไม่ทำอะไรต่อ (ไม่วางหมุด/ไม่บันทึก/ไม่ reverse)
+        }
+      // โหมดคลิกปักหมุดปกติ
       toast('กำลังค้นหาชื่อสถานที่...');
       try{
         const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&accept-language=th&zoom=12&addressdetails=1`;
@@ -571,12 +814,41 @@
     map.on('overlayremove',e => { if (e.layer === legendLayer) setLegendVisible(false); });
 
     function renderLegend(legend){
+      currentLegend = legend;
       const box = document.getElementById('legend');
-      if(!legend || !legend.stops || !legend.stops.length){ box.style.display = 'none'; return; }
+      if(!legend){ box.style.display = 'none'; return; }
+
       const bar = box.querySelector('.legend-bar');
       const labels = box.querySelector('.legend-labels');
       const title = box.querySelector('.legend-title');
       title.textContent = `PGA (${legend.units||'%g'})`;
+
+      // โหมดขั้นสี: ใช้ bounds + colors สร้าง hard-steps
+      if (legend.mode === 'discrete' && Array.isArray(legend.bounds) && Array.isArray(legend.colors)) {
+        const min = legend.min, max = legend.max;
+        const bounds = legend.bounds.slice(0, -1); // ตัด inf ตัวท้าย
+        const colors = legend.colors;
+
+        // คำนวณตำแหน่ง (%) ของแต่ละขอบ
+        const pos = bounds.map(v => ((v - min) / (max - min)) * 100);
+
+        // สร้าง CSS gradient แบบขั้น: สี i ตั้งแต่ pos[i] ถึง pos[i+1]
+        const parts = [];
+        for (let i=0; i<colors.length; i++){
+          const p0 = Math.max(0, Math.min(100, pos[i] || 0));
+          const p1 = Math.max(0, Math.min(100, pos[i+1] ?? 100));
+          parts.push(`${colors[i]} ${p0}%`, `${colors[i]} ${p1}%`);
+        }
+        bar.style.background = `linear-gradient(to right, ${parts.join(', ')})`;
+
+        // ป้ายหัวท้าย (เอา min/max)
+        labels.innerHTML = `<span><strong>${min}</strong></span><span><strong>${max}</strong></span>`;
+        box.style.display = 'block';
+        return;
+      }
+
+      // โหมดเดิม (gradient ลื่น ๆ ตาม stops)
+      if(!legend.stops || !legend.stops.length){ box.style.display = 'none'; return; }
       const grad = legend.stops.map((s,i)=>`${s.color} ${(i/(legend.stops.length-1))*100}%`).join(', ');
       bar.style.background = `linear-gradient(to right, ${grad})`;
       labels.innerHTML = `<span><strong>${legend.min.toFixed(0)}</strong></span><span><strong>${legend.max.toFixed(4)}</strong></span>`;
@@ -611,7 +883,7 @@
       window.exitOpsMode=()=>setOpsMode(false);
     })();
 
-    let currentNickname='';
+﻿    let currentNickname='';
     function loadNickname(){ try{ currentNickname = localStorage.getItem('nick') || ''; }catch(e){ currentNickname=''; } }
     function saveNickname(nick){
       currentNickname=(nick||'').trim();
@@ -626,11 +898,22 @@
     async function saveMyPin(lat, lon, label){
       try{
         if (!currentUser) throw new Error('ยังไม่ได้เชื่อมต่อบัญชี (Anonymous Auth)');
+
+        let needs = [];
+        try{
+          const profile = JSON.parse(localStorage.getItem('shakemapProfile')||'{}');
+          if (Array.isArray(profile.needs)) needs = profile.needs;
+        }catch(e){}
+
         await db.collection('pins').doc(currentUser.uid).set({
           uid: currentUser.uid, nick: currentNickname || '', label, lat, lon,
+          needs,
           ts: firebase.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
-      }catch(e){ console.error('saveMyPin error:', e.code, e.message); toast('บันทึกหมุดไม่สำเร็จ: ' + (e.message || e), true); }
+      }catch(e){
+        console.error('saveMyPin error:', e.code, e.message);
+        toast('บันทึกหมุดไม่สำเร็จ: ' + (e.message || e), true);
+      }
     }
 
     function subscribePins(){
@@ -640,9 +923,15 @@
           const id=doc.id, d=doc.data(); seen.add(id);
           const color=colorFromUid(d.uid||id);
           const owner=(d.nick||'').trim()?_esc(d.nick.trim()):String(d.uid||id).slice(0,8);
-          const html = `<div style="font-weight:700">${_esc(d.label||'ตำแหน่งที่เลือก')}</div>
-                        <div>Lat ${(+d.lat).toFixed(5)}, Lon ${(+d.lon).toFixed(5)}</div>
-                        <div style="margin-top:4px;font-size:12px;opacity:.8">โดย: ${owner}</div>`;
+          let html = `<div style="font-weight:700">${_esc(d.label||'ตำแหน่งที่เลือก')}</div>
+            <div>Lat ${(+d.lat).toFixed(5)}, Lon ${(+d.lon).toFixed(5)}</div>
+            <div style="margin-top:4px;font-size:12px;opacity:.8">โดย: ${owner}</div>`;
+
+          if (Array.isArray(d.needs) && d.needs.length){
+            const chips = d.needs.map(v=>`<span class="need-chip">${needLabel(v)}</span>`).join(' ');
+            html += `<div style="margin-top:6px">ต้องการความช่วยเหลือ : ${chips}</div>`;
+          }
+
           let mk=othersMarkers.get(id);
           if(!mk){ mk = makeCircleMarker(d.lat,d.lon,{ color, fillColor: color }); mk.bindPopup(html, { maxWidth:280, autoPan:true }); othersPinsGroup.addLayer(mk); othersMarkers.set(id,mk); }
           else{ mk.setLatLng([d.lat,d.lon]); mk.setStyle({ color, fillColor: color }); mk.getPopup()?.setContent(html); }
@@ -651,7 +940,7 @@
       }, err=>{ console.error(err); toast('อ่านหมุดไม่สำเร็จ: '+(err.message||err), true); });
     }
 
-    /* ===== Nickname: Chip + Modal (ทุกหน้าจอ) ===== */
+    /* ===== Nickname: Chip + Modal ===== */
     window.addEventListener('DOMContentLoaded', () => {
       const chip      = document.getElementById('nickChip');
       const chipLabel = document.getElementById('nickChipLabel');
@@ -664,7 +953,7 @@
       function refreshChip(){
         chipLabel.textContent = (currentNickname && currentNickname.trim())
           ? `ฉัน: ${currentNickname.trim()}`
-          : 'ตั้งชื่อเล่น';
+          : 'SOS';
       }
       function showNickModal(show=true){
         if (!modal) return;
@@ -681,8 +970,6 @@
       btnCancel?.addEventListener('click', () => showNickModal(false));
       btnCloseX?.addEventListener('click', () => showNickModal(false));
       modal?.addEventListener('click', (e)=>{ if(e.target===modal) showNickModal(false); });
-
-      // ปิดด้วย ESC
       document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape' && modal?.style.display === 'flex') showNickModal(false);
       });
@@ -691,11 +978,12 @@
         e.preventDefault();
         const v = (input.value || '').trim();
         saveNickname(v);
+        saveNicknameAndNeeds();
         refreshChip();
         showNickModal(false);
       });
 
-      refreshChip(); // ครั้งแรกหลังโหลด
+      refreshChip();
     });
 
     /* ====== Simulate dialog ====== */
@@ -710,16 +998,96 @@
       const simCancel=document.getElementById('simCancel');
       const simCloseX=document.getElementById('simCloseX');
 
-      function showSimModal(show=true){ if(!modalEl) return; modalEl.style.display = show ? 'flex' : 'none'; }
-      simBtn?.addEventListener('click', ()=> showSimModal(true));
+      // องค์ประกอบใหม่
+      const simSearch = document.getElementById('simSearch');
+      const simSearchBtn = document.getElementById('simSearchBtn');
+      const simResults = document.getElementById('simResults');
+      const simPickBtn = document.getElementById('simPickBtn');
+
+      function showSimModal(show=true){
+        if(!modalEl) return;
+        modalEl.style.display = show ? 'flex' : 'none';
+        if(!show){
+          if (simResults){ simResults.innerHTML=''; simResults.style.display='none'; }
+          window.__simPickOnce=false;
+        }
+      }
+      // === เปิดลิงก์ภายนอกแทนการเปิดโมดอล ===
+      const SIM_URL = 'https://simulateeq.onrender.com/';   // ← ใส่ลิงก์จริงทีหลังได้เลย
+      simBtn?.addEventListener('click', () => {
+        // เปิด “แท็บใหม่”
+        window.open(SIM_URL, '_blank', 'noopener');
+
+        // ถ้าต้องการให้ไปหน้าใหม่นี้ใน “แท็บเดียวกัน” ให้ใช้บรรทัดล่างแทน:
+        // location.assign(SIM_URL);
+      });
       simCancel?.addEventListener('click', ()=> showSimModal(false));
       simCloseX?.addEventListener('click', ()=> showSimModal(false));
       modalEl?.addEventListener('click', e=>{ if (e.target===modalEl) showSimModal(false); });
-
-      // ปิดด้วย ESC
       document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape' && modalEl?.style.display === 'flex') showSimModal(false);
       });
+
+      // แสดงผลลัพธ์ค้นหาในกล่อง
+      function renderSimResults(list){
+        simResults.innerHTML = '';
+        if (!list || !list.length){ simResults.style.display='none'; return; }
+        list.forEach(it=>{
+          const div = document.createElement('div');
+          div.className = 'item';
+          const name = it.display_name || it.name || `${it.lat}, ${it.lon}`;
+          div.textContent = name;
+          div.addEventListener('click', ()=> {
+            simLat.value = (+it.lat).toFixed(4);
+            simLon.value = (+it.lon).toFixed(4);
+            if (window.map) map.setView([+it.lat, +it.lon], Math.max(map.getZoom(), 10));
+            // ไม่สร้างหมุด!
+            simResults.innerHTML = '';
+            simResults.style.display = 'none';
+          });
+
+          simResults.appendChild(div);
+        });
+        simResults.style.display='block';
+      }
+
+      async function doSimSearch(q){
+        if (!q || q.trim().length<2){ renderSimResults([]); return; }
+        try {
+          let results=[];
+          try{ results = await queryNominatim(q, 8); }
+          catch(e){ results = await queryPhoton(q, 8); }
+          renderSimResults(results);
+        }catch(e){
+          console.error(e);
+          toast('ค้นหา (ในโมดอล) ล้มเหลว: '+(e.message||e), true);
+          renderSimResults([]);
+        }
+      }
+
+      // ✅ ค้นหาแล้ว auto-pick ผลลัพธ์ตัวแรก
+      simSearchBtn?.addEventListener('click', async ()=>{
+        await doSimSearch(simSearch.value);
+        const first = simResults.querySelector('.item');
+        if (first) first.click();
+      });
+      simSearch?.addEventListener('keydown', async (e)=>{
+        if (e.key==='Enter'){
+          e.preventDefault();
+          await doSimSearch(simSearch.value);
+          const first = simResults.querySelector('.item');
+          if (first) first.click();
+        }
+      });
+
+      // ✅ เปิดโหมดคลิกหนึ่งครั้งบนแผนที่ (ปิดโมดอลชั่วคราว)
+      simPickBtn?.addEventListener('click', () => {
+          window.__simPickOnce = true;                 // เปิดโหมดเลือกครั้งเดียว
+          try { map.getContainer().style.cursor = 'crosshair'; } catch(e){}
+          toast('โหมดเลือกพิกัด: คลิกบนแผนที่ 1 ครั้งเพื่อกรอกพิกัด');
+          const modalEl = document.getElementById('simulateModal');
+          if (modalEl) modalEl.style.display = 'none'; // ซ่อนโมดอลชั่วคราว
+        });
 
       let _simTmr=null;
       function setSimBtnTimer(running){ const b=document.getElementById('simulateBtn'); if(!b) return; if(_simTmr){ clearInterval(_simTmr); _simTmr=null; } b.disabled=!!running; b.innerHTML=`<i class="fa-solid fa-wave-square"></i>`; }
@@ -858,8 +1226,8 @@
         toggle.setAttribute('aria-expanded', String(!c));
         toggle.title = c ? 'แสดงเมนู' : 'ซ่อนเมนู';
         toggle.innerHTML = c
-          ? '<i class="fa-solid fa-chevron-left"></i>'   // พับอยู่ → แสดงลูกศรซ้าย
-          : '<i class="fa-solid fa-chevron-right"></i>';  // กางอยู่ → แสดงลูกศรขวา
+          ? '<i class="fa-solid fa-chevron-left"></i>'
+          : '<i class="fa-solid fa-chevron-right"></i>';
         try{ localStorage.setItem('trayCollapsed', c ? '1' : '0'); }catch(e){}
       }
 
@@ -868,11 +1236,130 @@
       toggle?.addEventListener('click', () => setCollapsed(!tray.classList.contains('collapsed')));
     });
 
-    // โหลดเหตุการณ์ล่าสุดอัตโนมัติเมื่อเปิดหน้า
+    // ================= Queue Control (จำกัดคนใช้งานพร้อมกัน) =================
+    (function(){
+      const ENTER_URL = "/api/queue/enter";
+      const STATUS_URL = "/api/queue/status";
+      const HEARTBEAT_URL = "/api/queue/heartbeat";
+      const LEAVE_URL = "/api/queue/leave";
+
+      // gen ids
+      function uuid(){ return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c=>(c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16) ); }
+      function getClientId(){ try{ let id=localStorage.getItem('clientId'); if(!id){ id=uuid(); localStorage.setItem('clientId', id); } return id; }catch(e){ return uuid(); } }
+      function getTabId(){ try{ let id=sessionStorage.getItem('tabId'); if(!id){ id=uuid(); sessionStorage.setItem('tabId', id); } return id; }catch(e){ return uuid(); } }
+
+      const clientId = getClientId();
+      const tabId = getTabId();
+
+      const modal = document.getElementById('queueModal');
+      const txt   = document.getElementById('queueText');
+      const posEl = document.getElementById('queuePosition');
+      const leaveBtn = document.getElementById('queueLeave');
+      const qActiveEl = document.getElementById('qActive');
+      const qLimitEl  = document.getElementById('qLimit');
+
+      let hbTimer=null, stTimer=null;
+      let inQueue=false, isActive=false;
+
+      function showQueueModal(show=true){
+        if(!modal) return;
+        modal.style.display = show ? 'flex' : 'none';
+        document.body.classList.toggle('queue-wait', show);
+      }
+
+      async function apiPost(url, payload){
+        const res = await fetch(url, {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify(payload||{})
+        });
+        return await res.json();
+      }
+      async function apiGet(url, params){
+        const qs = new URLSearchParams(params||{}).toString();
+        const res = await fetch(qs ? (url + "?" + qs) : url);
+        return await res.json();
+      }
+
+      function renderQueueUI(state){
+        if (qActiveEl && typeof state.active==='number') qActiveEl.textContent = String(state.active);
+        if (qLimitEl && typeof state.limit==='number')   qLimitEl.textContent  = String(state.limit);
+        if (state.position && posEl) posEl.textContent = `#${state.position}`;
+      }
+
+      function handleState(data){
+        renderQueueUI(data||{});
+        if(data?.state === 'active'){
+          inQueue=false; isActive=true; showQueueModal(false);
+          if(!hbTimer) heartbeatLoop();
+        }else if(data?.state === 'queued'){
+          inQueue=true; isActive=false;
+          txt.textContent = `ตอนนี้มีคนใช้งานครบ ${data.limit||'-'} คน กำลังรอคิว...`;
+          if (posEl && data.position) posEl.textContent = `#${data.position}`;
+          showQueueModal(true);
+          if(!stTimer) statusLoop();
+        }else{
+          inQueue=false; isActive=false;
+          setTimeout(enter, 1000);
+        }
+      }
+
+      async function enter(){
+        try{ const d = await apiPost(ENTER_URL, { client_id: clientId, tab_id: tabId }); handleState(d); }
+        catch(e){ console.error('enter error:', e); }
+      }
+      async function statusLoop(){
+        clearTimeout(stTimer);
+        try{ const d = await apiGet(STATUS_URL, { client_id: clientId, tab_id: tabId }); handleState(d); }
+        catch(e){ console.error('status error:', e); }
+        finally{ if(inQueue) stTimer = setTimeout(statusLoop, 3000); }
+      }
+      async function heartbeatLoop(){
+        clearTimeout(hbTimer);
+        try{ const d = await apiPost(HEARTBEAT_URL, { client_id: clientId, tab_id: tabId }); handleState(d); }
+        catch(e){ console.error('heartbeat error:', e); }
+        finally{ hbTimer = setTimeout(heartbeatLoop, 20000); }
+      }
+      function leave(){
+        try{
+          navigator.sendBeacon(LEAVE_URL, new Blob([JSON.stringify({ client_id: clientId, tab_id: tabId })], { type: 'application/json' }));
+        }catch(e){}
+      }
+      leaveBtn?.addEventListener('click', () => {
+        leave();
+        try { window.close(); } catch(e) {}
+        try {
+          window.opener = null;
+          window.open('', '_self');
+          window.close();
+        } catch(e) {}
+        setTimeout(() => {
+          try { window.location.replace('about:blank'); } catch(e) {}
+          setTimeout(() => { try { window.close(); } catch(e) {} }, 50);
+        }, 10);
+      });
+
+      window.addEventListener('beforeunload', leave);
+      document.addEventListener('visibilitychange', () => {
+        if(document.visibilityState === 'visible'){
+          if(isActive){ heartbeatLoop(); }
+          else if(inQueue){ statusLoop(); }
+        }
+      });
+
+      window.addEventListener('DOMContentLoaded', () => { enter(); });
+    })();
+
+    // โหลดเหตุการณ์ล่าสุดอัตโนมัติเมื่อเปิดหน้า (ถ้าได้สิทธิ์ active)
     window.addEventListener('DOMContentLoaded', () => {
-      setTimeout(() => runCompute({ timer: false }), 300);
+      const runBtn = document.getElementById('runBtn');
+      runBtn.disabled = true;
+      setTimeout(() => {
+        runCompute({ timer: false }).finally(() => {
+          runBtn.disabled = false;
+        });
+      }, 300);
     });
   </script>
 </body>
 </html>
-
