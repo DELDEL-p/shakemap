@@ -159,21 +159,18 @@ function updateNeedToggleText(){
 
 /* ==== บันทึกชื่อเล่น + ความต้องการ ==== */
 function saveNicknameAndNeeds(){
-  const nickEl = document.getElementById('nickModalInput');
+  const nickEl = document.getElementById('nicknameInput') || document.querySelector('#nickname input, #nickInput');
   const nickname = nickEl ? nickEl.value.trim() : '';
+  const needs = getSelectedNeeds();
 
-  // อ่านค่าจาก checkbox ทั้งหมด
-  const checked = Array.from(document.querySelectorAll('input[name="needs"]:checked')).map(cb => cb.value);
-  const otherText = document.getElementById('needOtherInput')?.value.trim();
-  if (otherText) checked.push(otherText);
-
-  const profile = { nickname, needs: checked };
+  const profile = { nickname, needs };
   localStorage.setItem('shakemapProfile', JSON.stringify(profile));
 
   try{ updateUserMarkerPopup && updateUserMarkerPopup(); }catch(e){}
-  document.getElementById('nickModal')?.style.setProperty('display', 'none');
+  try{
+    (document.getElementById('nicknameModal') || document.querySelector('.nickname-modal'))?.classList.remove('open');
+  }catch(e){}
 }
-
 
 /* ==== Hook เมื่อโหลด ==== */
 document.addEventListener('DOMContentLoaded', ()=>{
@@ -237,7 +234,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
     <div class="legend-labels"></div>
   </div>
 
-  <!-- Modal: SOS -->
+  <!-- Modal: ตั้งชื่อเล่น -->
   <div id="nickModal" class="modal-backdrop" style="display:none">
     <div class="modal">
       <button type="button" id="nickCloseX" class="modal-close" aria-label="ปิด">
@@ -252,17 +249,34 @@ document.addEventListener('DOMContentLoaded', ()=>{
           </label>
         </div>
         <!-- ต้องการความช่วยเหลือ (Dropdown แบบหลายตัวเลือก) -->
-        <div class="field-group">
-          <label class="label">ต้องการความช่วยเหลือ</label>
-          <div class="need-checklist">
-            <label><input type="checkbox" name="needs" value="medical"> การแพทย์/ยา</label>
-            <label><input type="checkbox" name="needs" value="food"> อาหาร/เสบียง</label>
-            <label><input type="checkbox" name="needs" value="water"> น้ำดื่ม</label>
-          
-            <input type="text" id="needOtherInput" placeholder="พิมพ์เพิ่มเติม...">
-          </div>
-        </div
-                <div class="modal-actions">
+<div class="field-group">
+  <label class="label">ต้องการความช่วยเหลือ</label>
+
+  <div id="needDropdown" class="need-dd" data-open="false">
+    <button type="button" class="need-dd-toggle" aria-haspopup="listbox" aria-expanded="false">
+      <span class="need-dd-placeholder">เลือกความช่วยเหลือ…</span>
+      <span class="need-dd-count" hidden></span>
+      <svg class="need-dd-caret" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M7 10l5 5 5-5z"></path>
+      </svg>
+    </button>
+
+    <div class="need-dd-menu" role="listbox" aria-multiselectable="true">
+      <div class="need-dd-search">
+        <input type="text" placeholder="ค้นหา…">
+      </div>
+      <ul class="need-dd-list"><!-- options จะถูกเติมด้วย JS --></ul>
+      <div class="need-dd-actions">
+        <button type="button" class="need-dd-clear">ล้าง</button>
+        <button type="button" class="need-dd-done">เสร็จสิ้น</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="hint">เลือกได้หลายรายการ</div>
+</div>
+
+        <div class="modal-actions">
           <button type="button" id="nickCancel" class="btn-secondary">ยกเลิก</button>
           <button type="submit" class="btn-primary">บันทึก</button>
         </div>
@@ -483,6 +497,23 @@ document.addEventListener('DOMContentLoaded', ()=>{
       "X+":"อพยพด่วนที่สุด หลีกเลี่ยงพื้นที่เสี่ยงทุกชนิด"
     };
 
+    function mmiFromAILevel(level, pred=null){
+      level = Math.max(1, Math.min(12, Math.round(Number(level) || 1)));
+
+      // MMI_CODES ของเว็บคุณเป็น ["I","II–III","IV","V","VI","VII","VIII","IX","X","X+"] 
+      let idx;
+      if (level <= 1) idx = 0;
+      else if (level <= 3) idx = 1;
+      else idx = Math.min(MMI_CODES.length - 1, level - 2); // 4->2, 5->3, ... 10->8, 11/12->9 (X+)
+
+      const rangeText = (pred != null)
+        ? `AI≈${Number(pred).toFixed(2)} → level ${level}`
+        : `AI level ${level}`;
+
+      return { idx, code:MMI_CODES[idx], color:MMI_COLORS[idx], shake:TH_SHAKING[idx], damage:TH_DAMAGE[idx], rangeText };
+    }
+
+
     function mmiFromPGA(pgaPercentG){
       let idx = 0; while (idx < PGA_THRESH.length && pgaPercentG >= PGA_THRESH[idx]) idx++;
       const lower = idx === 0 ? 0 : PGA_THRESH[idx-1];
@@ -548,7 +579,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
         lastEpicenter = epicenter;
         lastPGAData  = { bounds, epicenter, image_data_url, popup_html, meta };
         toast(`สำเร็จ: เวลา ${meta?.time_th || '-'}, ${meta?.changwat || '-'}`);
-        updateUserMarkerPopup(); drawUserDistanceLine();
+        updateUserMarkerPopup(); refreshSoilForMarker(); drawUserDistanceLine();
       }catch(err){
         console.error(err);
         toast('เกิดข้อผิดพลาด: '+(err.message||err), true);
@@ -587,6 +618,31 @@ document.addEventListener('DOMContentLoaded', ()=>{
     /* ---------------- Popup: เฉพาะ MMI + ลิงก์รายละเอียด ---------------- */
 /* ---------------- Popup: เฉพาะ MMI + ลิงก์รายละเอียด ---------------- */
 /* ---------------- Popup: เฉพาะ MMI + ลิงก์รายละเอียด ---------------- */
+
+
+// ================= Soil (Vs30 / NEHRP Site Class) =================
+// จะถูกเติมค่าจาก backend: GET /api/soil?lat=..&lon=..
+let lastSoilInfo = null;
+let __soilReqId = 0;
+
+async function refreshSoilForMarker(){
+  if (!searchMarker) return;
+  const { lat, lng } = searchMarker.getLatLng();
+  const rid = ++__soilReqId;
+  lastSoilInfo = { status: 'loading', lat, lon: lng };
+  updateUserMarkerPopup();
+  try{
+    const res = await fetch(`/api/soil?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}`);
+    const js = await res.json();
+    if (rid !== __soilReqId) return;
+    lastSoilInfo = js;
+  }catch(e){
+    if (rid !== __soilReqId) return;
+    lastSoilInfo = { status: 'error', error: (e && (e.message||String(e))) || 'error', lat, lon: lng };
+  }
+  updateUserMarkerPopup();
+}
+
 function updateUserMarkerPopup(){
   if (!searchMarker) return;
 
@@ -602,7 +658,13 @@ function updateUserMarkerPopup(){
       const pgaVal = (pgaObj && isFinite(pgaObj.pga) && pgaObj.pga > 0) ? pgaObj.pga : 0;
 
       const sev = classifySeverity(pgaVal);
-      const m   = mmiFromPGA(pgaVal);
+        let m;
+        if (pgaObj && typeof pgaObj.mmi_level === 'number') {
+          m = mmiFromAILevel(pgaObj.mmi_level, pgaObj.mmi_pred);
+        } else {
+          m = mmiFromPGA(pgaVal);
+        }
+
       const mmiOverlayColor = colorForPGAFromLegend(pgaVal);
 
       // ถ้า MMI เป็น I หรือ II–III ให้ใช้ "สีน้ำเงินของ MMI IV" แทน เพื่อให้อ่านง่าย
@@ -637,6 +699,25 @@ function updateUserMarkerPopup(){
     }
   }
 
+  
+
+// ---- ชั้นดิน (Vs30 / Site Class) ----
+if (lastSoilInfo){
+  if (lastSoilInfo.status === 'loading'){
+    popup += `<br><span>ชั้นดิน : <i>กำลังค้นหา...</i></span>`;
+  }else if (lastSoilInfo.status === 'error'){
+    popup += `<br><span>ชั้นดิน : <i style="color:#b00">ค้นหาไม่สำเร็จ</i></span>`;
+  }else if (lastSoilInfo.site_class){
+    const sc = _esc(lastSoilInfo.site_class);
+    const desc = _esc(lastSoilInfo.desc_th || '');
+    const vs30 = (lastSoilInfo.vs30_ms ? Number(lastSoilInfo.vs30_ms).toFixed(0) : '');
+    popup += `<br><span>ชั้นดิน (Site Class) : <b>${sc}</b>${desc ? ' — '+desc : ''}${vs30 ? ` <small>(Vs30≈${vs30} m/s)</small>` : ''}</span>`;
+  }else{
+    popup += `<br><span>ชั้นดิน : <i>ไม่พบข้อมูล</i></span>`;
+  }
+}else{
+  popup += `<br><span>ชั้นดิน : <i>ยังไม่ได้ค้นหา</i></span>`;
+}
   searchMarker.getPopup()?.setContent(popup);
 }
 
@@ -715,7 +796,7 @@ function updateUserMarkerPopup(){
       searchMarker.bindPopup(title, { maxWidth: 320, autoPan: true }).openPopup();
       map.flyTo([lat, lon], 13, { duration: 0.6 });
       toast('ค้นหาสำเร็จ: ' + (display || `(${lat.toFixed(5)}, ${lon.toFixed(5)})`));
-      updateUserMarkerPopup(); drawUserDistanceLine(); saveMyPin(lat, lon, display);
+      updateUserMarkerPopup(); refreshSoilForMarker(); drawUserDistanceLine(); saveMyPin(lat, lon, display);
     }
 
     let searching=false;
@@ -760,7 +841,7 @@ function updateUserMarkerPopup(){
           searchMarker.bindPopup(title, { maxWidth:320, autoPan:true }).openPopup();
           map.flyTo([latitude, longitude], 13, { duration: 0.6 });
           toast('แสดงตำแหน่งของคุณแล้ว');
-          updateUserMarkerPopup(); drawUserDistanceLine(); saveMyPin(latitude, longitude, display);
+          updateUserMarkerPopup(); refreshSoilForMarker(); drawUserDistanceLine(); saveMyPin(latitude, longitude, display);
         }catch(err){ toast('ไม่สามารถค้นหาชื่อสถานที่: '+(err.message||err), true); }
       }, err=>toast('ไม่สามารถหาตำแหน่ง: '+err.message, true));
     }
@@ -795,7 +876,7 @@ function updateUserMarkerPopup(){
         searchMarker = L.marker([lat,lng], { title, icon: blueIcon }).addTo(map);
         searchMarker.bindPopup(title, { maxWidth:320, autoPan:true }).openPopup();
         toast('เลือกตำแหน่งแล้ว');
-        updateUserMarkerPopup(); drawUserDistanceLine(); saveMyPin(lat, lng, display);
+        updateUserMarkerPopup(); refreshSoilForMarker(); drawUserDistanceLine(); saveMyPin(lat, lng, display);
       }catch(err){ toast('ไม่สามารถค้นหาชื่อสถานที่: '+(err.message||err), true); }
     });
 
@@ -1125,7 +1206,7 @@ function updateUserMarkerPopup(){
           lastEpicenter = epicenter;
           lastPGAData  = { bounds, epicenter, image_data_url, popup_html, meta };
           toast(`สำเร็จ: จำลอง Mw ${meta?.mag ?? meta?.mag_api ?? mag}, depth ${meta?.depth_km ?? depth} km`);
-          updateUserMarkerPopup(); drawUserDistanceLine();
+          updateUserMarkerPopup(); refreshSoilForMarker(); drawUserDistanceLine();
         }catch(err){ console.error(err); toast('คำนวณเหตุการณ์จำลองล้มเหลว: '+(err.message||err), true); }
         finally{ setSimBtnTimer(false); }
       }
@@ -1360,6 +1441,51 @@ function updateUserMarkerPopup(){
         });
       }, 300);
     });
+    // === Modal แสดงตาราง MMI–PGA ===
+    document.addEventListener('DOMContentLoaded', () => {
+      const legendBar = document.querySelector('.legend-bar');
+      const modal = document.getElementById('mmiTableModal');
+      const closeX = document.getElementById('mmiTableClose');
+      const closeBtn = document.getElementById('mmiTableCloseBtn');
+
+      if (legendBar) {
+        legendBar.style.cursor = 'pointer';
+        legendBar.title = 'คลิกเพื่อดูตาราง MMI–PGA';
+        legendBar.addEventListener('click', () => {
+          modal.style.display = 'flex';
+        });
+      }
+
+      [closeX, closeBtn].forEach(btn =>
+        btn?.addEventListener('click', () => modal.style.display = 'none')
+      );
+
+      modal.addEventListener('click', e => {
+        if (e.target === modal) modal.style.display = 'none';
+      });
+    });
+
   </script>
+  <!-- Modal: ตาราง MMI–PGA -->
+    <div id="mmiTableModal" class="modal-backdrop" style="display:none">
+      <div class="modal" style="max-width:600px">
+        <button type="button" id="mmiTableClose" class="modal-close" aria-label="ปิด">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+        <h3 class="modal-title">ตารางความสัมพันธ์ระหว่าง MMI และ PGA</h3>
+        <div class="modal-body" style="text-align:center">
+          <!-- แสดงรูปที่คุณให้มา -->
+          <img src="/static/mmi_pga_table.png" alt="MMI–PGA Table"
+              style="max-width:100%; border-radius:8px; box-shadow:0 0 6px rgba(0,0,0,.15)">
+          <p style="margin-top:8px; font-size:13px; color:#555">
+            ที่มา: USGS Standard Conversion (MMI–PGA)
+          </p>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="mmiTableCloseBtn" class="btn-primary">ปิด</button>
+        </div>
+      </div>
+    </div>
+
 </body>
 </html>
