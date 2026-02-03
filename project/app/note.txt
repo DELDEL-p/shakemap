@@ -1,4 +1,4 @@
-pip install -r requirements.txt
+pip install -r requirements.txt     pip install scikit-learn joblib numpy
 uvicorn app.main:app --reload
-winget/brew install Cloudflare.cloudflared -e
+winget install Cloudflare.cloudflared -e
 cloudflared tunnel --url http://localhost:8000

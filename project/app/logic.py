@@ -2,7 +2,9 @@ import io
 import re
 import math
 import base64
+from pathlib import Path
 import numpy as np
+import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
@@ -11,6 +13,65 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize, ListedColormap, BoundaryNorm
 from scipy.interpolate import griddata   # ใช้เท่านี้พอ
+
+import os
+import ctypes
+from ctypes import wintypes
+
+from pathlib import Path
+
+# --- AI MMI model (joblib) ---
+# NOTE:
+#  - โมเดลที่คุณ train เป็น sklearn pipeline ที่เรียกฟังก์ชัน make_features()
+#  - ตอนโหลด joblib, pickle จะพยายาม import โมดูลเดิมที่ใช้ตอน train
+#    เราเลยทำ shim ให้รองรับทั้งกรณี 'features.make_features' และ '__main__.make_features'
+MMI_MODEL = None
+_MODEL_PATH = Path(__file__).resolve().parent / "static" / "models" / "mmi_model.joblib"
+
+
+def _ensure_model_shims():
+    import sys
+    # 1) กรณีโมเดลอ้างอิง features.make_features
+    try:
+        from . import features as _app_features  # app/features.py
+        sys.modules.setdefault("features", _app_features)
+    except Exception:
+        pass
+
+    # 2) กรณีโมเดลอ้างอิง __main__.make_features (พบบ่อยถ้า train จาก train.py โดยตรง)
+    try:
+        import __main__
+        if not hasattr(__main__, "make_features"):
+            from .features import make_features as _mf
+            setattr(__main__, "make_features", _mf)
+    except Exception:
+        pass
+
+try:
+    import joblib
+    _ensure_model_shims()
+    if _MODEL_PATH.exists():
+        MMI_MODEL = joblib.load(_MODEL_PATH)
+        print(f"[MMI_MODEL] loaded: {_MODEL_PATH}")
+    else:
+        print(f"[MMI_MODEL] not found: {_MODEL_PATH}")
+except Exception as e:
+    print("[MMI_MODEL] load failed:", repr(e))
+    MMI_MODEL = None
+
+def _win_short_path(path: str) -> str:
+    """แปลง path เป็น 8.3 short path บน Windows เพื่อให้ lib C (netCDF4/HDF5) เปิดได้ง่ายขึ้น"""
+    if os.name != "nt":
+        return path
+    try:
+        GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW
+        GetShortPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        GetShortPathNameW.restype = wintypes.DWORD
+        buf = ctypes.create_unicode_buffer(4096)
+        r = GetShortPathNameW(path, buf, len(buf))
+        return buf.value if r else path
+    except Exception:
+        return path
 
 # ====== Interpolation switches ======
 USE_INTERPOLATION  = True          # บังคับใช้ interpolation
@@ -188,6 +249,210 @@ def _fmt_num(x, digits=3):
     s = s.rstrip('0').rstrip('.')
     return s if s else "0"
 
+
+
+# ================= Soil (Vs30 / NEHRP Site Class) =================
+# แนวคิด: ถ้ามีไฟล์ Vs30 (GeoTIFF/GRD) ใน static/data จะ sample เพื่อแปลงเป็น "Site Class"
+# - GeoTIFF แนะนำ: vs30_thailand.tif หรือ vs30_global.tif
+# - GMT/NetCDF GRD: vs30_global.grd
+
+_VS30_CACHE = {"kind": None, "ds": None, "band": None, "path": None, "last_error": None}
+
+
+def _site_class_from_vs30(vs30_ms: float) -> str:
+    """NEHRP Site Class (A–E) จาก Vs30 (m/s)."""
+    if vs30_ms is None or not np.isfinite(vs30_ms) or vs30_ms <= 0:
+        return ""
+    if vs30_ms > 1500:
+        return "A"
+    if vs30_ms >= 760:
+        return "B"
+    if vs30_ms >= 360:
+        return "C"
+    if vs30_ms >= 180:
+        return "D"
+    return "E"
+
+def _site_class_desc_th(sc: str) -> str:
+    return {
+        "A": "หินแข็งมาก",
+        "B": "หินแข็ง",
+        "C": "ดินแน่น/หินผุ",
+        "D": "ดินอ่อน–ปานกลาง",
+        "E": "ดินอ่อนมาก",
+    }.get(sc, "")
+
+def _load_vs30_dataset():
+    """โหลด Vs30 dataset แบบ lazy (ถ้ามี). คืน True/False"""
+    if _VS30_CACHE.get("ds") is not None:
+        return True
+
+    data_dir = Path(__file__).resolve().parent / "static" / "data"
+    tif_candidates = ["vs30_thailand.tif", "vs30_global.tif", "global_vs30.tif", "vs30.tif"]
+    grd_candidates = ["vs30_global.grd", "global_vs30.grd", "vs30.grd"]
+
+    # 1) GeoTIFF (ใช้ rasterio)
+    for name in tif_candidates:
+        p = data_dir / name
+        if p.exists():
+            try:
+                import rasterio  # type: ignore
+                ds = rasterio.open(p)
+                _VS30_CACHE.update({"kind": "tif", "ds": ds, "band": 1, "path": str(p), "last_error": None})
+                return True
+            except Exception as e:
+                _VS30_CACHE["last_error"] = f"read_error:{p.name}:{e}"
+                # ลองไฟล์ถัดไป
+                continue
+
+        # 2) GRD/NetCDF (ใช้ xarray)
+    for name in grd_candidates:
+        p = data_dir / name
+        if p.exists():
+            try:
+                import xarray as xr  # type: ignore
+
+                errors = {}
+
+                # 1) บังคับลอง netcdf4 ก่อน (ไฟล์คุณเป็น NetCDF4)
+                path_str = str(p)
+                try:
+                    ds = xr.open_dataset(path_str, engine="netcdf4")
+                except Exception as e:
+                    # ถ้าเจอ Errno 2 ให้ลอง short path (ช่วยเรื่อง path ไทย/ยาวบน Windows)
+                    if "Errno 2" in str(e):
+                        shortp = _win_short_path(path_str)
+                        if shortp != path_str:
+                            ds = xr.open_dataset(shortp, engine="netcdf4")
+                            path_str = shortp
+                        else:
+                            raise
+                    else:
+                        raise
+
+                _VS30_CACHE.update({"kind": "grd", "ds": ds, "band": None, "path": path_str, "last_error": None})
+                return True
+
+
+                # 2) ลอง h5netcdf ถัดไป
+                try:
+                    ds = xr.open_dataset(p, engine="h5netcdf")
+                    _VS30_CACHE.update({"kind": "grd", "ds": ds, "band": None, "path": str(p), "last_error": None})
+                    return True
+                except Exception as e:
+                    errors["h5netcdf"] = str(e)
+
+                # 3) ค่อยลอง default (เผื่อบางเครื่องใช้ได้)
+                try:
+                    ds = xr.open_dataset(p)
+                    _VS30_CACHE.update({"kind": "grd", "ds": ds, "band": None, "path": str(p), "last_error": None})
+                    return True
+                except Exception as e:
+                    errors["default"] = str(e)
+
+                # 4) สุดท้ายค่อย scipy (แต่ถ้าไฟล์เป็น NetCDF4 มักไม่ผ่าน)
+                try:
+                    ds = xr.open_dataset(p, engine="scipy")
+                    _VS30_CACHE.update({"kind": "grd", "ds": ds, "band": None, "path": str(p), "last_error": None})
+                    return True
+                except Exception as e:
+                    errors["scipy"] = str(e)
+
+                # ถ้าล้มหมด ให้เก็บ error จริงทุก engine (สำคัญมาก)
+                _VS30_CACHE["last_error"] = f"read_error:{p.name}: " + " | ".join([f"{k}={v}" for k, v in errors.items()])
+                continue
+
+            except Exception as e:
+                _VS30_CACHE["last_error"] = f"read_error:{p.name}:{e}"
+                continue
+            
+    _VS30_CACHE["last_error"] = _VS30_CACHE.get("last_error") or "no_local_vs30_dataset"
+    return False
+
+
+
+
+
+def _sample_vs30(lat: float, lon: float):
+    """คืนค่า (vs30_ms, source_text) หรือ (None, reason)."""
+    if not _load_vs30_dataset():
+        return None, (_VS30_CACHE.get("last_error") or "no_local_vs30_dataset")
+
+
+    kind = _VS30_CACHE.get("kind")
+    ds = _VS30_CACHE.get("ds")
+    path = _VS30_CACHE.get("path") or ""
+
+    if kind == "tif":
+        try:
+            val = list(ds.sample([(float(lon), float(lat))]))[0]
+            v = float(val[0]) if val is not None and len(val) else float("nan")
+            if not np.isfinite(v):
+                return None, f"nodata:{Path(path).name}"
+            return v, f"local_tif:{Path(path).name}"
+        except Exception:
+            return None, f"read_error:{Path(path).name}"
+
+    if kind == "grd":
+        try:
+            import xarray as xr  # type: ignore
+            import numpy as _np
+            # เลือก data variable แรก (ส่วนมากคือ vs30)
+            var_name = next(iter(ds.data_vars))
+            da = ds[var_name]
+
+            # หาชื่อแกน lat/lon ได้ทั้ง coords และ dims
+            lat_candidates = ["lat", "latitude", "y"]
+            lon_candidates = ["lon", "longitude", "x"]
+
+            lat_name = next((n for n in lat_candidates if n in da.coords), None)
+            lon_name = next((n for n in lon_candidates if n in da.coords), None)
+
+            if lat_name is None:
+                lat_name = next((n for n in lat_candidates if n in da.dims), None)
+            if lon_name is None:
+                lon_name = next((n for n in lon_candidates if n in da.dims), None)
+
+            if lon_name is None or lat_name is None:
+                return None, f"bad_coords:{Path(path).name}"
+
+            # handle lon domain 0..360
+            lon_q = float(lon)
+            lon_vals = da[lon_name].values
+            try:
+                lon_min = float(_np.nanmin(lon_vals))
+                lon_max = float(_np.nanmax(lon_vals))
+                if lon_min >= 0 and lon_max > 180 and lon_q < 0:
+                    lon_q = lon_q + 360.0
+            except Exception:
+                pass
+
+            # ใช้ sel แบบ nearest (ไม่ต้องคำนวณ index เอง)
+            v = da.sel({lat_name: float(lat), lon_name: float(lon_q)}, method="nearest").values
+            v = float(_np.array(v).ravel()[0])
+
+            if not _np.isfinite(v):
+                return None, f"nodata:{Path(path).name}"
+            return v, f"local_grd:{Path(path).name}"
+        except Exception as e:
+            return None, f"read_error:{Path(path).name}:{e}"
+
+
+def get_soil_info(lat: float, lon: float) -> dict:
+    """ข้อมูลชั้นดิน (Site Class) จากพิกัด"""
+    vs30, src = _sample_vs30(lat, lon)
+    sc = _site_class_from_vs30(vs30) if vs30 is not None else ""
+    return {
+        "lat": float(lat),
+        "lon": float(lon),
+        "vs30_ms": float(vs30) if vs30 is not None and np.isfinite(vs30) else None,
+        "site_class": sc or None,
+        "desc_th": _site_class_desc_th(sc) if sc else None,
+        "source": src,
+        "status": "ok" if sc else "no_data",
+    }
+
+
 # ---------- คำนวณ GMPE (CY08) ที่ “จุดที่กำหนด” ----------
 def _pga_cy08_at_points(mag, depth, src_lat, src_lon, lat_arr, lon_arr):
     """คำนวณ PGA (หน่วย %g) ที่ชุดพิกัด lat_arr/lon_arr ตาม CY08"""
@@ -297,6 +562,29 @@ def compute_overlay_from_event(ev: dict):
     masked_pga = PGA_T * soft_mask
     masked_pga = np.where(np.isnan(masked_pga), 0.0, masked_pga)
     masked_pga = np.where(masked_pga < 0, 0.0, masked_pga)
+    
+    # --- AI: predict MMI over grid (optional) ---
+    mmi_pred_grid = None
+    mmi_level_grid = None
+
+    if MMI_MODEL is not None:
+        try:
+            Xg = pd.DataFrame({
+                "dist": dist_ep.ravel(),                 # km
+                "pga":  masked_pga.ravel(),              # %g (เหมือนใน train)
+                "mag":  np.full(masked_pga.size, float(mag)),
+            })
+
+            pred = MMI_MODEL.predict(Xg)
+            pred = np.clip(pred, 1.0, 12.0)
+
+            mmi_pred_grid  = pred.reshape(masked_pga.shape)
+            mmi_level_grid = np.clip(np.rint(pred), 1, 12).astype(int).reshape(masked_pga.shape)
+
+        except Exception as e:
+            print("[MMI_MODEL] predict grid failed:", repr(e))
+            mmi_pred_grid = None
+            mmi_level_grid = None
 
     pga_max = float(np.nanmax(masked_pga))
 
@@ -364,11 +652,18 @@ def compute_overlay_from_event(ev: dict):
     pga_points = []
     for i in range(LAT_T.shape[0]):
         for j in range(LAT_T.shape[1]):
-            pga_points.append({
+            pt = {
                 "lat": float(LAT_T[i, j]),
                 "lon": float(LON_T[i, j]),
-                "pga": float(masked_pga[i, j])
-            })
+                "pga": float(masked_pga[i, j]),
+            }
+
+            # ✅ เพิ่มตรงนี้ (แนบผล AI ถ้ามี)
+            if mmi_level_grid is not None:
+                pt["mmi_level"] = int(mmi_level_grid[i, j])   # 1..12
+                pt["mmi_pred"]  = float(mmi_pred_grid[i, j])  # ค่าทศนิยม
+
+            pga_points.append(pt)
 
     # วาดภาพโปร่งใสเป็น PNG (ใช้ cmap/norm จากด้านบน)
     # === บันทึกรูปแบบที่กรอบภาพ = กรอบพิกัดเป๊ะ ===
@@ -413,6 +708,13 @@ def compute_overlay_from_event(ev: dict):
 
     time_th_fmt = _fmt_th_datetime(time_th) if time_th else "-"
 
+    # --- Soil info at epicenter (Vs30 / Site Class) ---
+    soil = None
+    try:
+        soil = get_soil_info(lat, lon)
+    except Exception:
+        soil = None
+
     popup_html = f"""
 <div style="line-height:1.5; font-size:1.2em; color:red; padding:4px; text-align:center;">
   <strong>แผ่นดินไหว</strong><br>
@@ -422,6 +724,8 @@ def compute_overlay_from_event(ev: dict):
   ขนาด: <b>{_fmt_num(mag, 2)}</b><br>
   จุดศูนย์กลาง: <b>{region_text}</b><br>
   ค่าระดับการสั่นสะเทือนสูงสุด: <b><span style="color:red;">{_fmt_num(pga_max, 4)}</span> %g</b><br>
+  ชั้นดิน: <b>{(soil.get('site_class') if soil else None) or '-'}</b> {(('('+soil.get('desc_th')+')') if soil and soil.get('desc_th') else '')}<br>
+  Vs30: <b>{(_fmt_num(soil.get('vs30_ms'), 0) if soil and soil.get('vs30_ms') is not None else '-')}</b> m/s<br>
 </div>
 """.strip()
 
@@ -514,4 +818,31 @@ def mmi_from_pga(pga_percent_g: float):
         "damage_th": damage,
         "range_text": range_text,
         "bin_index": idx
+    }
+
+def debug_vs30_paths():
+    from pathlib import Path
+    data_dir = Path(__file__).resolve().parent / "static" / "data"
+    candidates = [
+        "vs30_global.grd",
+        "global_vs30.grd",
+        "vs30.grd",
+        "vs30_thailand.tif",
+        "vs30_global.tif",
+        "global_vs30.tif",
+        "vs30.tif",
+    ]
+    exists = {name: (data_dir / name).exists() for name in candidates}
+    listing = []
+    try:
+        listing = sorted([p.name for p in data_dir.iterdir()])
+    except Exception as e:
+        listing = [f"(listdir error) {e}"]
+
+    return {
+        "logic_file": str(Path(__file__).resolve()),
+        "data_dir": str(data_dir),
+        "data_dir_exists": data_dir.exists(),
+        "listing": listing,
+        "candidate_exists": exists,
     }
